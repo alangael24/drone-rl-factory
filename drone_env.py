@@ -86,6 +86,20 @@ class DroneEnvs:
         self._lib.get_dones_ptr.argtypes = [ctypes.c_void_p]
         self._lib.get_dones_ptr.restype = ctypes.POINTER(ctypes.c_int)
 
+        # Domain Randomization (DrEureka)
+        self._lib.set_domain_randomization.argtypes = [
+            ctypes.c_void_p,  # envs
+            ctypes.c_float,   # mass_min
+            ctypes.c_float,   # mass_max
+            ctypes.c_float,   # drag_min
+            ctypes.c_float,   # drag_max
+            ctypes.c_float,   # wind_max
+            ctypes.c_float,   # gravity_var
+            ctypes.c_float,   # motor_noise_max
+            ctypes.c_int      # enabled
+        ]
+        self._lib.set_domain_randomization.restype = None
+
     def _setup_buffers(self):
         """Crea arrays numpy que apuntan a la memoria C."""
         # Obtener punteros
@@ -114,6 +128,42 @@ class DroneEnvs:
         self._lib.reset_all(self._envs)
         self._lib.get_observations(self._envs)
         return self.observations.copy()
+
+    def set_domain_randomization(
+        self,
+        mass_min: float = 0.8,
+        mass_max: float = 1.2,
+        drag_min: float = 0.05,
+        drag_max: float = 0.2,
+        wind_max: float = 1.0,
+        gravity_var: float = 0.05,
+        motor_noise_max: float = 0.1,
+        enabled: bool = True
+    ):
+        """
+        Configura Domain Randomization (DrEureka).
+
+        Args:
+            mass_min: Masa mínima del dron (kg)
+            mass_max: Masa máxima del dron (kg)
+            drag_min: Coeficiente de arrastre mínimo
+            drag_max: Coeficiente de arrastre máximo
+            wind_max: Fuerza máxima de viento (N)
+            gravity_var: Variación de gravedad (±porcentaje)
+            motor_noise_max: Ruido máximo en motores (±porcentaje)
+            enabled: Si activar Domain Randomization
+        """
+        self._lib.set_domain_randomization(
+            self._envs,
+            ctypes.c_float(mass_min),
+            ctypes.c_float(mass_max),
+            ctypes.c_float(drag_min),
+            ctypes.c_float(drag_max),
+            ctypes.c_float(wind_max),
+            ctypes.c_float(gravity_var),
+            ctypes.c_float(motor_noise_max),
+            ctypes.c_int(1 if enabled else 0)
+        )
 
     def step(self, actions: np.ndarray):
         """

@@ -268,10 +268,24 @@ class PPOTrainer:
             "entropy": total_entropy / n_batches,
         }
 
-    def train(self, total_steps: int, log_interval: int = 10000):
-        """Loop principal de entrenamiento."""
+    def train(self, total_steps: int, log_interval: int = 10000, return_metrics: bool = False):
+        """
+        Loop principal de entrenamiento.
+
+        Args:
+            total_steps: Número total de pasos de entrenamiento
+            log_interval: Intervalo para logging
+            return_metrics: Si True, devuelve (policy, metrics_dict)
+
+        Returns:
+            policy o (policy, metrics_dict) si return_metrics=True
+        """
         start_time = time.time()
         iteration = 0
+
+        # Historial de métricas para análisis
+        reward_history = []
+        loss_history = []
 
         print(f"\nIniciando entrenamiento por {total_steps:,} pasos...")
         print(f"Entornos paralelos: {self.num_envs}")
@@ -291,12 +305,15 @@ class PPOTrainer:
 
             iteration += 1
 
+            # Guardar métricas
+            avg_reward = self.rewards_buffer.mean().item()
+            reward_history.append(avg_reward)
+            loss_history.append(metrics)
+
             # Logging
             if self.total_steps % log_interval < self.n_steps * self.num_envs:
                 elapsed = time.time() - start_time
                 sps = self.total_steps / elapsed
-
-                avg_reward = self.rewards_buffer.mean().item()
 
                 print(
                     f"Pasos: {self.total_steps:>10,} | "
@@ -311,6 +328,23 @@ class PPOTrainer:
         print("-" * 50)
         print(f"Entrenamiento completado en {total_time:.1f}s")
         print(f"Velocidad promedio: {total_steps / total_time:,.0f} pasos/segundo")
+
+        if return_metrics:
+            # Calcular métricas finales detalladas
+            final_metrics = {
+                'mean_reward': np.mean(reward_history[-100:]) if reward_history else 0,
+                'max_reward': np.max(reward_history) if reward_history else 0,
+                'min_reward': np.min(reward_history) if reward_history else 0,
+                'final_reward': reward_history[-1] if reward_history else 0,
+                'reward_history': reward_history,
+                'total_steps': self.total_steps,
+                'training_time': total_time,
+                'steps_per_second': total_steps / total_time,
+                'final_pg_loss': loss_history[-1]['pg_loss'] if loss_history else 0,
+                'final_vf_loss': loss_history[-1]['vf_loss'] if loss_history else 0,
+                'final_entropy': loss_history[-1]['entropy'] if loss_history else 0,
+            }
+            return self.policy, final_metrics
 
         return self.policy
 

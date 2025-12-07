@@ -3,15 +3,17 @@
  *
  * Física simplificada de quadcopter para entrenamiento RL ultrarrápido.
  * Diseñado para ser llamado millones de veces por segundo.
+ *
+ * Implementa Domain Randomization (DrEureka) para robustez sim-to-real.
  */
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-// Constantes físicas
-#define GRAVITY 9.81f
-#define MASS 1.0f
+// Constantes físicas por defecto (pueden ser sobrescritas por DR)
+#define DEFAULT_GRAVITY 9.81f
+#define DEFAULT_MASS 1.0f
 #define DT 0.02f  // 50 Hz simulation
 #define MAX_THRUST 20.0f
 #define MAX_TORQUE 5.0f
@@ -21,7 +23,7 @@
 #define MAX_HEIGHT 5.0f
 #define MIN_HEIGHT 0.0f
 
-// Estado del dron (44 bytes)
+// Estado del dron con parámetros de Domain Randomization
 typedef struct {
     // Posición (x, y, z)
     float x, y, z;
@@ -42,7 +44,35 @@ typedef struct {
     int steps;
     int collisions;
     float total_reward;
+
+    // === DOMAIN RANDOMIZATION (DrEureka) ===
+    // Parámetros físicos aleatorizados por entorno
+    float mass;           // Masa del dron (varía entre entornos)
+    float drag_coeff;     // Coeficiente de arrastre aerodinámico
+    float wind_x;         // Fuerza de viento en X
+    float wind_y;         // Fuerza de viento en Y
+    float wind_z;         // Fuerza de viento en Z
+    float gravity;        // Gravedad (puede variar ligeramente)
+    float motor_noise;    // Ruido en los motores (0-1)
 } DroneState;
+
+// Configuración de Domain Randomization
+typedef struct {
+    // Rangos para aleatorización de masa
+    float mass_min;
+    float mass_max;
+    // Rangos para arrastre
+    float drag_min;
+    float drag_max;
+    // Fuerza máxima de viento
+    float wind_max;
+    // Variación de gravedad (±%)
+    float gravity_var;
+    // Ruido de motor máximo
+    float motor_noise_max;
+    // Flag para activar/desactivar DR
+    int enabled;
+} DomainRandomConfig;
 
 // Configuración del entorno
 typedef struct {
@@ -51,7 +81,83 @@ typedef struct {
     float* observations;    // Buffer de observaciones (num_envs * obs_size)
     float* rewards;         // Buffer de recompensas
     int* dones;             // Buffer de terminaciones
+    DomainRandomConfig dr_config;  // Configuración de Domain Randomization
 } DroneEnvs;
+
+// ============================================================
+// FUNCIONES DE DOMAIN RANDOMIZATION
+// ============================================================
+
+/**
+ * Genera un número aleatorio uniforme en [0, 1]
+ */
+static inline float rand_uniform() {
+    return (float)rand() / (float)RAND_MAX;
+}
+
+/**
+ * Genera un número aleatorio uniforme en [min, max]
+ */
+static inline float rand_range(float min_val, float max_val) {
+    return min_val + rand_uniform() * (max_val - min_val);
+}
+
+/**
+ * Aplica Domain Randomization a un estado
+ */
+void apply_domain_randomization(DroneState* state, DomainRandomConfig* config) {
+    if (!config->enabled) {
+        // Usar valores por defecto
+        state->mass = DEFAULT_MASS;
+        state->drag_coeff = 0.1f;
+        state->wind_x = 0.0f;
+        state->wind_y = 0.0f;
+        state->wind_z = 0.0f;
+        state->gravity = DEFAULT_GRAVITY;
+        state->motor_noise = 0.0f;
+        return;
+    }
+
+    // Aleatorizar masa
+    state->mass = rand_range(config->mass_min, config->mass_max);
+
+    // Aleatorizar arrastre
+    state->drag_coeff = rand_range(config->drag_min, config->drag_max);
+
+    // Aleatorizar viento (dirección y magnitud)
+    state->wind_x = rand_range(-config->wind_max, config->wind_max);
+    state->wind_y = rand_range(-config->wind_max, config->wind_max);
+    state->wind_z = rand_range(-config->wind_max * 0.5f, config->wind_max * 0.5f);
+
+    // Aleatorizar gravedad (pequeña variación)
+    float grav_variation = 1.0f + rand_range(-config->gravity_var, config->gravity_var);
+    state->gravity = DEFAULT_GRAVITY * grav_variation;
+
+    // Aleatorizar ruido de motor
+    state->motor_noise = rand_range(0.0f, config->motor_noise_max);
+}
+
+/**
+ * Configura los parámetros de Domain Randomization
+ */
+void set_domain_randomization(
+    DroneEnvs* envs,
+    float mass_min, float mass_max,
+    float drag_min, float drag_max,
+    float wind_max,
+    float gravity_var,
+    float motor_noise_max,
+    int enabled
+) {
+    envs->dr_config.mass_min = mass_min;
+    envs->dr_config.mass_max = mass_max;
+    envs->dr_config.drag_min = drag_min;
+    envs->dr_config.drag_max = drag_max;
+    envs->dr_config.wind_max = wind_max;
+    envs->dr_config.gravity_var = gravity_var;
+    envs->dr_config.motor_noise_max = motor_noise_max;
+    envs->dr_config.enabled = enabled;
+}
 
 // ============================================================
 // FUNCIONES DE FÍSICA
@@ -68,6 +174,7 @@ static inline float clamp(float value, float min_val, float max_val) {
 
 /**
  * Actualiza la física del dron por un paso de tiempo
+ * Usa parámetros de Domain Randomization del estado
  */
 void physics_step(DroneState* state, float thrust, float roll_cmd, float pitch_cmd, float yaw_cmd) {
     // Limitar comandos
@@ -75,6 +182,14 @@ void physics_step(DroneState* state, float thrust, float roll_cmd, float pitch_c
     roll_cmd = clamp(roll_cmd, -MAX_TORQUE, MAX_TORQUE);
     pitch_cmd = clamp(pitch_cmd, -MAX_TORQUE, MAX_TORQUE);
     yaw_cmd = clamp(yaw_cmd, -MAX_TORQUE, MAX_TORQUE);
+
+    // Aplicar ruido de motor (Domain Randomization)
+    if (state->motor_noise > 0.0f) {
+        float noise = (rand_uniform() - 0.5f) * 2.0f * state->motor_noise;
+        thrust *= (1.0f + noise);
+        roll_cmd *= (1.0f + noise * 0.5f);
+        pitch_cmd *= (1.0f + noise * 0.5f);
+    }
 
     // Actualizar velocidades angulares (simplificado: torque directo)
     float damping = 0.95f;
@@ -103,13 +218,17 @@ void physics_step(DroneState* state, float thrust, float roll_cmd, float pitch_c
     float thrust_world_y = -thrust * sin_roll * cos_pitch;
     float thrust_world_z = thrust * cos_roll * cos_pitch;
 
-    // Aceleración = Fuerza/Masa - Gravedad
-    float ax = thrust_world_x / MASS;
-    float ay = thrust_world_y / MASS;
-    float az = (thrust_world_z / MASS) - GRAVITY;
+    // Usar masa y gravedad del estado (Domain Randomization)
+    float mass = state->mass > 0.0f ? state->mass : DEFAULT_MASS;
+    float gravity = state->gravity > 0.0f ? state->gravity : DEFAULT_GRAVITY;
 
-    // Damping aerodinámico
-    float air_damping = 0.1f;
+    // Aceleración = Fuerza/Masa - Gravedad + Viento
+    float ax = (thrust_world_x + state->wind_x) / mass;
+    float ay = (thrust_world_y + state->wind_y) / mass;
+    float az = ((thrust_world_z + state->wind_z) / mass) - gravity;
+
+    // Damping aerodinámico (usa coeficiente del estado)
+    float air_damping = state->drag_coeff > 0.0f ? state->drag_coeff : 0.1f;
     ax -= state->vx * air_damping;
     ay -= state->vy * air_damping;
     az -= state->vz * air_damping;
@@ -198,9 +317,21 @@ DroneEnvs* create_envs(int num_envs) {
     envs->rewards = (float*)calloc(num_envs, sizeof(float));
     envs->dones = (int*)calloc(num_envs, sizeof(int));
 
+    // Inicializar configuración de Domain Randomization por defecto (desactivado)
+    envs->dr_config.mass_min = 0.8f;
+    envs->dr_config.mass_max = 1.2f;
+    envs->dr_config.drag_min = 0.05f;
+    envs->dr_config.drag_max = 0.2f;
+    envs->dr_config.wind_max = 1.0f;
+    envs->dr_config.gravity_var = 0.05f;
+    envs->dr_config.motor_noise_max = 0.1f;
+    envs->dr_config.enabled = 0;  // Desactivado por defecto
+
     // Inicializar estados
     for (int i = 0; i < num_envs; i++) {
         envs->states[i].target_z = 1.0f;  // Objetivo: hovering a 1m
+        // Aplicar DR inicial
+        apply_domain_randomization(&envs->states[i], &envs->dr_config);
     }
 
     return envs;
@@ -221,20 +352,24 @@ void destroy_envs(DroneEnvs* envs) {
 
 /**
  * Resetea un entorno específico
+ * Aplica Domain Randomization para nuevos parámetros físicos
  */
 void reset_env(DroneEnvs* envs, int env_idx) {
     DroneState* state = &envs->states[env_idx];
     memset(state, 0, sizeof(DroneState));
 
     // Posición inicial aleatoria (cerca del centro)
-    state->x = ((float)rand() / RAND_MAX - 0.5f) * 2.0f;
-    state->y = ((float)rand() / RAND_MAX - 0.5f) * 2.0f;
+    state->x = (rand_uniform() - 0.5f) * 2.0f;
+    state->y = (rand_uniform() - 0.5f) * 2.0f;
     state->z = 0.1f;  // Justo encima del suelo
 
     // Objetivo
     state->target_x = 0.0f;
     state->target_y = 0.0f;
     state->target_z = 1.0f;
+
+    // Aplicar Domain Randomization (nuevos parámetros físicos para este episodio)
+    apply_domain_randomization(state, &envs->dr_config);
 }
 
 /**
