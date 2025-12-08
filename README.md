@@ -1,148 +1,112 @@
-# Drone RL Factory
+# Universal Robotics Platform
 
-**Un motor de neuro-evolución para drones autónomos.**
-
-Sistema que usa LLMs (Gemini/GPT-4) para generar funciones de recompensa en C, compilarlas dinámicamente, y entrenar políticas neuronales de control de drones en segundos.
+Plataforma de Inteligencia General para entrenar CUALQUIER sistema robótico usando RL + LLM.
 
 ## Arquitectura
 
 ```
-┌─────────────────┐
-│   LLM (Gemini)  │ genera código C
-│   "Arquitecto"  │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   GCC COMPILER  │ compila a .so
-│                 │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  PHYSICS IN C   │ 2M+ pasos/seg
-│   (libdrone)    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   PPO TRAINER   │ entrena en 40s
-│   (PyTorch)     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  NEURAL POLICY  │ cerebro del dron
-│   (.pt file)    │
-└─────────────────┘
+Usuario: "Robot de warehouse que navega"
+              │
+              ▼
+┌─────────────────────────────────┐
+│  DomainSpec                     │  Define estado, acciones, física
+└─────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────┐
+│  UniversalArchitect (LLM)       │  Genera physics_step() + calculate_reward()
+└─────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────┐
+│  UniversalCompiler (GCC)        │  Compila C → .so (~2M steps/sec)
+└─────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────┐
+│  UniversalEnv (ctypes)          │  Python ↔ C zero-copy
+└─────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────┐
+│  PPO Training                   │  Entrenamiento vectorizado
+└─────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────┐
+│  UniversalJudge                 │  Métricas agnósticas de aprendizaje
+└─────────────────────────────────┘
+              │
+              ▼
+┌─────────────────────────────────┐
+│  UniversalEvolution (Eureka)    │  Evolución de recompensas
+└─────────────────────────────────┘
 ```
 
-## Rendimiento
+## Dominios Disponibles
 
-| Métrica | Valor |
-|---------|-------|
-| Velocidad de simulación | 2,000,000+ pasos/seg |
-| Tiempo de entrenamiento (500K pasos) | ~40 segundos |
-| Tiempo de compilación C | <1 segundo |
-
-## Instalación
-
-```bash
-# Crear entorno virtual
-python3 -m venv venv
-source venv/bin/activate
-
-# Instalar dependencias
-pip install torch numpy gymnasium matplotlib google-generativeai
-
-# Compilar kernel C
-cd c_src
-gcc -O3 -fPIC -shared -o libdrone.so drone_dynamics.c -lm
-cd ..
-```
+| Dominio | Observaciones | Acciones | Descripción |
+|---------|---------------|----------|-------------|
+| `drone` | 15 | 4 | Quadcopter volador |
+| `cartpole` | 4 | 1 | Péndulo invertido |
+| `robotic_arm` | 8 | 2 | Brazo de 2 joints |
+| `warehouse_robot` | 10 | 2 | Robot diferencial |
 
 ## Uso
 
-### 1. Entrenar una política
-
 ```bash
-# Con función de recompensa mock
-python train.py hover 500000
+# Entrenamiento rápido
+python universal_platform.py --domain cartpole --task "balancear palo"
 
-# Con LLM (requiere API key en config.py)
-python train.py waypoint 500000 --api
+# Con evolución Eureka
+python universal_platform.py --domain drone --task "hover a 1m" --evolve
+
+# Modo interactivo
+python universal_platform.py --interactive
+
+# Ver dominios
+python universal_platform.py --list-domains
 ```
 
-### 2. Visualizar resultados
+## Archivos
 
-```bash
-python visualize.py --model models/drone_policy_hover.pt --episodes 5
+- `domain_spec.py` - Definición declarativa de dominios robóticos
+- `universal_architect.py` - Generación de física y recompensa con LLM
+- `universal_compiler.py` - Compilación dinámica de código C
+- `universal_env.py` - Wrapper de entornos para cualquier dominio
+- `universal_judge.py` - Evaluación agnóstica de aprendizaje
+- `universal_evolution.py` - Bucle evolutivo Eureka
+- `universal_platform.py` - CLI unificada
+
+## Añadir Nuevo Dominio
+
+```python
+# En domain_spec.py
+def create_my_robot_domain() -> DomainSpec:
+    return DomainSpec(
+        name="MyRobot",
+        description="Mi robot personalizado",
+        state_fields=[
+            StateField("x", description="Posición X"),
+            StateField("velocity", description="Velocidad"),
+        ],
+        action_fields=[
+            ActionField("motor", -1.0, 1.0, "Control de motor"),
+        ],
+        physics_description="Descripción para el LLM",
+        reward_hints="Pistas para diseñar recompensas",
+    )
+
+# Registrar en catálogo
+DOMAIN_CATALOG["my_robot"] = create_my_robot_domain
 ```
-
-### 3. Generar y compilar recompensa personalizada
-
-```bash
-python compiler.py  # Compila función de recompensa mock
-```
-
-## Estructura del Proyecto
-
-```
-sprint3_rl/
-├── c_src/
-│   ├── drone_dynamics.c   # Kernel de física en C
-│   └── libdrone.so        # Librería compilada
-├── models/
-│   ├── drone_policy_hover.pt
-│   └── drone_policy_waypoint.pt
-├── config.py              # Configuración y prompts
-├── architect.py           # Generador de recompensas C con LLM
-├── compiler.py            # Compilador dinámico GCC
-├── drone_env.py           # Puente Python-C (ctypes)
-├── train.py               # Entrenamiento PPO
-└── visualize.py           # Visualizador 3D
-```
-
-## API de Recompensas en C
-
-El LLM genera funciones con esta firma:
-
-```c
-typedef struct {
-    float x, y, z;           // Posición
-    float vx, vy, vz;        // Velocidad
-    float roll, pitch, yaw;  // Orientación
-    float roll_rate, pitch_rate, yaw_rate;
-    float target_x, target_y, target_z;
-    int steps, collisions;
-    float total_reward;
-} DroneState;
-
-float calculate_reward(DroneState* state) {
-    // Lógica de recompensa generada por LLM
-    return reward;
-}
-```
-
-## Tareas Disponibles
-
-- **hover**: Mantener altura estable a 1 metro
-- **waypoint**: Volar hacia un objetivo 3D
-- **smooth**: Vuelo suave con mínima oscilación
 
 ## Requisitos
 
-- Python 3.10+
-- GCC
-- PyTorch
-- NumPy
-- Matplotlib
-- API Key de Gemini (opcional, para generación con LLM)
+```bash
+pip install torch numpy gymnasium
+```
 
 ## Licencia
 
 MIT
-
-## Autor
-
-Generado con Claude Code
