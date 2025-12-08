@@ -143,6 +143,72 @@ class SimplePPO:
 
         return self.collector.get_metrics()
 
+    def train_with_early_stopping(
+        self,
+        total_steps: int,
+        dry_run_steps: int = 1000,
+        min_learning_gain: float = 0.01,
+        verbose: bool = True
+    ) -> tuple:
+        """
+        Entrena con Early Stopping agresivo (Candado de Convergencia).
+
+        Estrategia:
+        1. Ejecuta dry_run_steps (≈10 segundos)
+        2. Si la recompensa es plana → aborta (90% probable que sea imposible)
+        3. Si hay progreso → continúa hasta total_steps
+
+        Args:
+            total_steps: Pasos totales si se aprueba el dry run
+            dry_run_steps: Pasos para el ensayo seco
+            min_learning_gain: Ganancia mínima requerida en dry run
+            verbose: Si imprimir progreso
+
+        Returns:
+            (metrics, approved, diagnosis)
+        """
+        if verbose:
+            print(f"\n🔬 DRY RUN - Evaluando aprendizaje en {dry_run_steps} pasos (~10s)...")
+
+        # Fase 1: Dry Run
+        metrics_dry = self.train(dry_run_steps)
+
+        # Análisis del dry run
+        learning_gain = (
+            (metrics_dry.mean_reward_final - metrics_dry.mean_reward_initial)
+            / (abs(metrics_dry.mean_reward_initial) + 1e-6)
+        )
+
+        if verbose:
+            print(f"\n📊 Resultados del Dry Run:")
+            print(f"  Recompensa inicial: {metrics_dry.mean_reward_initial:.4f}")
+            print(f"  Recompensa final:   {metrics_dry.mean_reward_final:.4f}")
+            print(f"  Ganancia: {learning_gain*100:.2f}%")
+            print(f"  Estabilidad: {metrics_dry.reward_std:.4f}")
+
+        # Decidir
+        if learning_gain < min_learning_gain and metrics_dry.reward_std < 0.1:
+            diagnosis = (
+                f"Recompensa PLANA en dry run (ganancia {learning_gain*100:.2f}%). "
+                f"99% probable que sea imposible de aprender. Abortando."
+            )
+            if verbose:
+                print(f"\n❌ ABORTING: {diagnosis}")
+            return metrics_dry, False, diagnosis
+
+        if verbose:
+            print(f"\n✅ DRY RUN PASSED - Hay señal de aprendizaje. Continuando...")
+
+        # Fase 2: Entrenamiento masivo (si pasó el dry run)
+        remaining_steps = total_steps - dry_run_steps
+        if remaining_steps > 0:
+            if verbose:
+                print(f"   Entrenando {remaining_steps} pasos adicionales...")
+            metrics_final = self.train(remaining_steps)
+            return metrics_final, True, "Entrenamiento completado exitosamente"
+        else:
+            return metrics_dry, True, "Dry run completado"
+
     def _compute_gae(self, rewards, dones, values, next_value):
         """Calcula Generalized Advantage Estimation"""
         import torch

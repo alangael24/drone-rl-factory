@@ -193,11 +193,15 @@ def verified_train(
             print(f"  Tests pasados: {report.passed_tests}/{report.total_tests}")
 
             if not report.all_tests_passed:
-                print(f"\n[ADVERTENCIA] Código no pasó todos los tests:")
+                print(f"\n[ERROR CRÍTICO] Código no pasó verificación física:")
                 for test in report.tests:
                     if test.result != TestResult.PASSED:
-                        print(f"  - {test.name}: {test.message}")
-                print("\nContinuando con mejor código disponible...")
+                        print(f"  ❌ {test.name}: {test.message}")
+                print(f"\nDiagnóstico: {report.failure_diagnosis}")
+                print("\nSugerencias de corrección:")
+                for hint in report.correction_hints:
+                    print(f"  → {hint}")
+                raise RuntimeError(f"Verificación fallida: {report.failure_diagnosis}. No se iniciará el entrenamiento para proteger el presupuesto.")
 
         # Fase 2: Compilar
         print("\n=== FASE 2: COMPILACIÓN ===\n")
@@ -216,14 +220,41 @@ def verified_train(
 
         print(f"Librería compilada: {output.library_path}")
 
-        # Fase 3: Entrenar
+        # Fase 2.5: Vista Previa Visual (Candado Visual)
+        print("\n=== FASE 2.5: VISTA PREVIA ===\n")
+
+        from preview_physics import preview_physics
+        approved, preview_diagnosis = preview_physics(
+            domain, physics_code, reward_code, verify_code,
+            duration_seconds=5.0
+        )
+
+        if not approved:
+            print(f"\n[ERROR] Vista previa falló: {preview_diagnosis}")
+            print("Abortando para proteger el presupuesto.")
+            raise RuntimeError(f"Vista previa rechazada: {preview_diagnosis}")
+
+        print("\n✅ Vista previa APROBADA")
+
+        # Fase 3: Entrenar con Early Stopping (Candado de Convergencia)
         print("\n=== FASE 3: ENTRENAMIENTO ===\n")
 
         env = UniversalVecEnv(num_envs, domain, output.library_path)
 
         from simple_ppo import SimplePPO
         ppo = SimplePPO(env, domain)
-        metrics = ppo.train(steps)
+
+        # Usar early stopping agresivo
+        metrics, training_approved, training_diagnosis = ppo.train_with_early_stopping(
+            total_steps=steps,
+            dry_run_steps=min(1000, steps // 10),  # 10% o 1000 pasos
+            min_learning_gain=0.01
+        )
+
+        if not training_approved:
+            print(f"\n[ERROR] Entrenamiento rechazado: {training_diagnosis}")
+            env.close()
+            raise RuntimeError(f"Early stopping: {training_diagnosis}")
 
         # Evaluar
         judge = UniversalJudge()
