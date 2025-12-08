@@ -85,6 +85,7 @@ from universal_compiler import UniversalCompiler, CompileResult
 from universal_env import UniversalVecEnv, create_from_domain_name
 from universal_judge import UniversalJudge, generate_semantic_reflection
 from universal_evolution import UniversalEvolution, evolve_domain, EvolutionResult
+from physics_verifier import PhysicsVerifier, SelfCorrectingArchitect, VerificationReport, TestResult
 
 
 def print_banner():
@@ -118,6 +119,159 @@ def print_available_domains():
         print(f"                       Obs: {domain.obs_size}, Actions: {domain.action_size}")
 
     print("-" * 50)
+
+
+def verified_train(
+    domain_name: str,
+    task: str,
+    steps: int = 100_000,
+    num_envs: int = 64,
+    use_mock: bool = False,
+    save_model: bool = True,
+    max_attempts: int = 3
+) -> Optional[str]:
+    """
+    Entrenamiento con verificación física previa.
+
+    Usa SelfCorrectingArchitect para generar código que pasa
+    verificación de física antes de entrenar.
+
+    Args:
+        domain_name: Nombre del dominio
+        task: Descripción de la tarea
+        steps: Pasos de entrenamiento
+        num_envs: Entornos paralelos
+        use_mock: Si usar código mock
+        save_model: Si guardar el modelo
+        max_attempts: Intentos máximos de auto-corrección
+
+    Returns:
+        Path al modelo guardado, o None si falló
+    """
+    print(f"\n{'='*60}")
+    print(f"ENTRENAMIENTO VERIFICADO")
+    print(f"Dominio: {domain_name}")
+    print(f"Tarea: {task}")
+    print(f"Pasos: {steps:,}")
+    print(f"Verificación: Activada (max {max_attempts} intentos)")
+    print(f"{'='*60}\n")
+
+    try:
+        domain = get_domain(domain_name)
+
+        # Fase 1: Generar código verificado
+        print("=== FASE 1: GENERACIÓN VERIFICADA ===\n")
+
+        if use_mock:
+            # Mock: usar código pre-definido
+            from universal_architect import UniversalArchitect
+            architect = UniversalArchitect()
+            generated = architect.generate_both(domain, task)
+            physics_code = generated.physics_code
+            reward_code = generated.reward_code
+
+            # Verificar el código mock
+            verifier = PhysicsVerifier()
+            report = verifier.verify(domain, physics_code, reward_code)
+
+            print(f"Verificación mock:")
+            print(f"  Resultado: {'PASSED' if report.all_tests_passed else 'FAILED'}")
+            print(f"  Tests pasados: {report.passed_tests}/{report.total_tests}")
+
+            if not report.all_tests_passed:
+                print(f"\nTests fallidos:")
+                for test in report.tests:
+                    if test.result != TestResult.PASSED:
+                        print(f"  - {test.name}: {test.message}")
+                print("\nNota: Código mock no pasó verificación, continuando de todos modos...")
+        else:
+            # Real: usar SelfCorrectingArchitect
+            architect = SelfCorrectingArchitect(max_attempts=max_attempts)
+            physics_code, reward_code, report = architect.generate_verified(domain, task)
+
+            print(f"\nResultado de verificación:")
+            print(f"  Tests pasados: {report.passed_tests}/{report.total_tests}")
+
+            if not report.all_tests_passed:
+                print(f"\n[ADVERTENCIA] Código no pasó todos los tests:")
+                for test in report.tests:
+                    if test.result != TestResult.PASSED:
+                        print(f"  - {test.name}: {test.message}")
+                print("\nContinuando con mejor código disponible...")
+
+        # Fase 2: Compilar
+        print("\n=== FASE 2: COMPILACIÓN ===\n")
+
+        compiler = UniversalCompiler("c_src")
+        output = compiler.compile(
+            domain,
+            physics_code,
+            reward_code,
+            output_name=f"lib{domain_name}_verified"
+        )
+
+        if output.result != CompileResult.SUCCESS:
+            print(f"Error de compilación: {output.error_message}")
+            return None
+
+        print(f"Librería compilada: {output.library_path}")
+
+        # Fase 3: Entrenar
+        print("\n=== FASE 3: ENTRENAMIENTO ===\n")
+
+        env = UniversalVecEnv(num_envs, domain, output.library_path)
+
+        from simple_ppo import SimplePPO
+        ppo = SimplePPO(env, domain)
+        metrics = ppo.train(steps)
+
+        # Evaluar
+        judge = UniversalJudge()
+        result = judge.judge(metrics)
+
+        print(f"\nResultado: {result.quality.value}")
+        print(f"Score: {result.score:.1f}/100")
+        print(f"Diagnóstico: {result.diagnosis}")
+
+        # Guardar modelo
+        if save_model:
+            import torch
+            model_path = f"models/{domain_name}_verified_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
+            os.makedirs("models", exist_ok=True)
+
+            torch.save({
+                "policy": ppo.policy.state_dict(),
+                "actor_mean": ppo.actor_mean.state_dict(),
+                "actor_logstd": ppo.actor_logstd,
+                "critic": ppo.critic.state_dict(),
+                "domain": domain_name,
+                "task": task,
+                "score": result.score,
+                "verified": True,
+                "physics_tests_passed": report.passed_tests,
+                "physics_tests_total": report.total_tests,
+            }, model_path)
+
+            # Guardar código verificado
+            code_path = f"models/{domain_name}_verified_code_{datetime.now().strftime('%Y%m%d_%H%M%S')}.c"
+            with open(code_path, 'w') as f:
+                f.write(f"// Physics Code\n{physics_code}\n\n// Reward Code\n{reward_code}")
+
+            print(f"\nArchivos guardados:")
+            print(f"  Modelo: {model_path}")
+            print(f"  Código: {code_path}")
+
+            env.close()
+            return model_path
+
+        env.close()
+        return None
+
+    except Exception as e:
+        print(f"\nError: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def quick_train(
@@ -330,8 +484,10 @@ def interactive_mode():
         print("\nOpciones:")
         print("  1. Entrenamiento rápido")
         print("  2. Evolución completa")
-        print("  3. Ver dominios")
-        print("  4. Salir")
+        print("  3. Entrenamiento verificado (con tests de física)")
+        print("  4. Verificar física solo")
+        print("  5. Ver dominios")
+        print("  6. Salir")
 
         try:
             choice = input("\nSelección: ").strip()
@@ -356,9 +512,59 @@ def interactive_mode():
             evolve_and_train(domain, task, generations=gens, use_mock=True)
 
         elif choice == "3":
-            print_available_domains()
+            domain = input("Dominio (drone/cartpole/robotic_arm/warehouse_robot): ").strip()
+            task = input("Tarea: ").strip()
+            steps = input("Pasos [100000]: ").strip()
+            steps = int(steps) if steps else 100_000
+            use_real = input("¿Usar LLM real? (s/n) [n]: ").strip().lower()
+
+            verified_train(domain, task, steps, use_mock=(use_real != 's'))
 
         elif choice == "4":
+            # Solo verificar física sin entrenar
+            domain_name = input("Dominio: ").strip()
+            try:
+                domain = get_domain(domain_name)
+
+                print("\nGenerando código mock para verificar...")
+                from universal_architect import UniversalArchitect
+                architect = UniversalArchitect()
+                generated = architect.generate_both(domain, "test")
+
+                print("Ejecutando tests de física...\n")
+                verifier = PhysicsVerifier()
+                report = verifier.verify(domain, generated.physics_code, generated.reward_code)
+
+                print(f"\n{'='*50}")
+                print(f"REPORTE DE VERIFICACIÓN - {domain_name}")
+                print(f"{'='*50}")
+                print(f"Resultado: {'PASSED' if report.all_tests_passed else 'FAILED'}")
+                print(f"Tests pasados: {report.passed_tests}/{report.total_tests}")
+
+                passed = [t for t in report.tests if t.result == TestResult.PASSED]
+                failed = [t for t in report.tests if t.result != TestResult.PASSED]
+
+                if passed:
+                    print(f"\nTests exitosos:")
+                    for test in passed:
+                        print(f"  ✓ {test.name}")
+
+                if failed:
+                    print(f"\nTests fallidos:")
+                    for test in failed:
+                        print(f"  ✗ {test.name}: {test.message}")
+
+                if report.failure_diagnosis:
+                    print(f"\nDiagnóstico:")
+                    print(f"  {report.failure_diagnosis}")
+
+            except Exception as e:
+                print(f"Error: {e}")
+
+        elif choice == "5":
+            print_available_domains()
+
+        elif choice == "6":
             print("\nHasta luego!")
             break
 
@@ -374,6 +580,7 @@ def main():
 Ejemplos:
   python universal_platform.py --domain drone --task "hover estable"
   python universal_platform.py --domain cartpole --task "balancear" --evolve
+  python universal_platform.py --domain drone --task "hover" --verify
   python universal_platform.py --list-domains
   python universal_platform.py --interactive
 """
@@ -383,6 +590,7 @@ Ejemplos:
     parser.add_argument("--task", type=str, help="Descripción de la tarea")
     parser.add_argument("--steps", type=int, default=100_000, help="Pasos de entrenamiento")
     parser.add_argument("--evolve", action="store_true", help="Usar evolución antes de entrenar")
+    parser.add_argument("--verify", action="store_true", help="Verificar física antes de entrenar")
     parser.add_argument("--generations", type=int, default=3, help="Generaciones de evolución")
     parser.add_argument("--population", type=int, default=3, help="Tamaño de población")
     parser.add_argument("--mock", action="store_true", help="Usar código mock (sin LLM)")
@@ -411,7 +619,14 @@ Ejemplos:
 
     print_banner()
 
-    if args.evolve:
+    if args.verify:
+        verified_train(
+            args.domain,
+            args.task,
+            steps=args.steps,
+            use_mock=args.mock or True  # Por defecto mock
+        )
+    elif args.evolve:
         evolve_and_train(
             args.domain,
             args.task,
