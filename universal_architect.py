@@ -29,6 +29,7 @@ class GeneratedCode:
     """Código generado por el arquitecto"""
     physics_code: str  # Función physics_step
     reward_code: str   # Función calculate_reward
+    verify_code: str   # Función verify_domain_physics (semántica)
     success: bool
     error_message: str = ""
     raw_response: str = ""
@@ -134,6 +135,37 @@ IMPORTANTE:
 - Responde con AMBAS funciones
 - Sepáralas claramente
 - Sin explicaciones, solo código C
+"""
+
+VERIFY_GENERATION_PROMPT = """Genera una función de verificación semántica para validar que la física se comporta correctamente.
+
+DOMINIO:
+{domain_prompt}
+
+FÍSICA GENERADA:
+```c
+{physics_code}
+```
+
+Necesito una función C con esta firma:
+```c
+int verify_domain_physics({state_struct}* state) {{
+    // Retorna 1 si el estado es físicamente válido, 0 si no
+}}
+```
+
+REQUISITOS:
+1. Valida que el estado tenga valores SEMÁNTICAMENTE correctos
+2. NO valides solo rangos numéricos, valida FÍSICA REAL
+3. Ejemplos de checks:
+   - Para drones: if (z < 0) return 0; // No puede estar bajo tierra
+   - Para coches: if (wheel_angle > max_steering) return 0; // Giro excesivo
+   - Para brazos: if (joint_angle < min_angle || joint_angle > max_angle) return 0;
+   - Para cosas con velocidad: if (speed > max_speed) return 0; // Violación de límite
+4. Usa lógica if/else simple, sin bucles
+5. Retorna 0 si hay violación, 1 si todo está bien
+
+Responde SOLO con el código C de la función, sin explicaciones ni markdown.
 """
 
 REFLECTION_PROMPT = """Eres un experto analizando resultados de entrenamiento de RL.
@@ -284,7 +316,7 @@ class UniversalArchitect:
         # Llamar LLM
         response = self._call_llm(prompt)
         if not response:
-            return GeneratedCode("", "", False, "No hubo respuesta del LLM")
+            return GeneratedCode("", "", "", False, "No hubo respuesta del LLM")
 
         # Extraer y validar código
         code = self._extract_c_code(response)
@@ -293,6 +325,7 @@ class UniversalArchitect:
         return GeneratedCode(
             physics_code=code if valid else "",
             reward_code="",
+            verify_code="",
             success=valid,
             error_message=error,
             raw_response=response,
@@ -329,7 +362,7 @@ class UniversalArchitect:
 
         response = self._call_llm(prompt)
         if not response:
-            return GeneratedCode("", "", False, "No hubo respuesta del LLM")
+            return GeneratedCode("", "", "", False, "No hubo respuesta del LLM")
 
         code = self._extract_c_code(response)
         valid, error = self._validate_reward_code(code, domain)
@@ -337,6 +370,7 @@ class UniversalArchitect:
         return GeneratedCode(
             physics_code="",
             reward_code=code if valid else "",
+            verify_code="",
             success=valid,
             error_message=error,
             raw_response=response,
@@ -361,9 +395,10 @@ class UniversalArchitect:
             physics = self._mock_physics(domain)
             reward = self._mock_reward(domain, task_description)
             return GeneratedCode(
-                physics_code=physics.physics_code,
-                reward_code=reward.reward_code,
-                success=physics.success and reward.success,
+            physics_code=physics.physics_code,
+            reward_code=reward.reward_code,
+            verify_code="",
+            success=physics.success and reward.success,
             )
 
         action_descriptions = "\n".join(
@@ -381,7 +416,7 @@ class UniversalArchitect:
 
         response = self._call_llm(prompt)
         if not response:
-            return GeneratedCode("", "", False, "No hubo respuesta del LLM")
+            return GeneratedCode("", "", "", False, "No hubo respuesta del LLM")
 
         # Separar las dos funciones
         code = self._extract_c_code(response)
@@ -409,6 +444,7 @@ class UniversalArchitect:
         return GeneratedCode(
             physics_code=physics_code,
             reward_code=reward_code,
+            verify_code="",
             success=physics_valid and reward_valid,
             error_message=f"Physics: {physics_error}, Reward: {reward_error}" if not (physics_valid and reward_valid) else "",
             raw_response=response,
@@ -449,7 +485,7 @@ class UniversalArchitect:
 
         response = self._call_llm(prompt)
         if not response:
-            return GeneratedCode("", "", False, "No hubo respuesta del LLM")
+            return GeneratedCode("", "", "", False, "No hubo respuesta del LLM")
 
         code = self._extract_c_code(response)
         valid, error = self._validate_reward_code(code, domain)
@@ -457,6 +493,7 @@ class UniversalArchitect:
         return GeneratedCode(
             physics_code="",
             reward_code=code if valid else previous_code,
+            verify_code="",
             success=valid,
             error_message=error,
             raw_response=response,
@@ -505,7 +542,7 @@ class UniversalArchitect:
         else:
             code = self._mock_generic_physics(domain)
 
-        return GeneratedCode(physics_code=code, reward_code="", success=True)
+        return GeneratedCode(physics_code=code, reward_code="", verify_code="", success=True)
 
     def _mock_reward(self, domain: DomainSpec, task: str) -> GeneratedCode:
         """Genera recompensa mock basada en el dominio y tarea"""
@@ -532,7 +569,7 @@ class UniversalArchitect:
         else:
             code = self._mock_generic_reward(domain)
 
-        return GeneratedCode(physics_code="", reward_code=code, success=True)
+        return GeneratedCode(physics_code="", reward_code=code, verify_code="", success=True)
 
     def _mock_drone_physics(self) -> str:
         return """void physics_step(DroneState* state, float* actions) {
@@ -882,6 +919,153 @@ class UniversalArchitect:
     // TODO: Implementar recompensa específica para {domain.name}
 
     return reward;
+}}"""
+
+    def generate_verification(
+        self,
+        domain: DomainSpec,
+        physics_code: str
+    ) -> str:
+        """
+        Genera función de verificación semántica en C.
+
+        Args:
+            domain: Especificación del dominio
+            physics_code: Código de física ya generado
+
+        Returns:
+            Código C de la función verify_domain_physics()
+        """
+        if self.use_mock:
+            return self._mock_verification(domain)
+
+        prompt = UNIVERSAL_SYSTEM_PROMPT + "\n\n" + VERIFY_GENERATION_PROMPT.format(
+            domain_prompt=domain.to_architect_prompt(),
+            state_struct=domain.state_struct_name,
+            physics_code=physics_code,
+        )
+
+        response = self._call_llm(prompt)
+        if not response:
+            return self._mock_verification(domain)
+
+        code = self._extract_c_code(response)
+        valid, _ = self._validate_verify_code(code, domain)
+
+        return code if valid else self._mock_verification(domain)
+
+    def _validate_verify_code(self, code: str, domain: DomainSpec) -> Tuple[bool, str]:
+        """Valida código de verificación"""
+        if "int verify_domain_physics" not in code:
+            return False, "Falta la función verify_domain_physics"
+
+        if "return" not in code:
+            return False, "No retorna valor"
+
+        # Verificar que no usa funciones prohibidas
+        forbidden = ["printf", "malloc", "free", "scanf", "fopen", "for (", "while ("]
+        for fn in forbidden:
+            if fn in code:
+                return False, f"Usa elemento prohibido: {fn}"
+
+        return True, ""
+
+    def _mock_verification(self, domain: DomainSpec) -> str:
+        """Genera verificación mock basada en el dominio"""
+        if domain.name == "Drone":
+            return self._mock_drone_verify()
+        elif domain.name == "CartPole":
+            return self._mock_cartpole_verify()
+        elif domain.name == "RoboticArm2D":
+            return self._mock_arm_verify()
+        elif domain.name == "WarehouseRobot":
+            return self._mock_warehouse_verify()
+        else:
+            return self._mock_generic_verify(domain)
+
+    def _mock_drone_verify(self) -> str:
+        """Verificación mock para drone"""
+        return """int verify_domain_physics(DroneState* state) {
+    // No puede estar bajo tierra
+    if (state->z < 0.0f) return 0;
+
+    // Altura máxima razonable (100 metros)
+    if (state->z > 100.0f) return 0;
+
+    // Velocidades no pueden ser extremas
+    if (fabsf(state->vx) > 50.0f) return 0;
+    if (fabsf(state->vy) > 50.0f) return 0;
+    if (fabsf(state->vz) > 50.0f) return 0;
+
+    // Orientaciones en rango válido
+    if (fabsf(state->roll) > 3.14159f) return 0;
+    if (fabsf(state->pitch) > 3.14159f) return 0;
+
+    return 1;
+}"""
+
+    def _mock_cartpole_verify(self) -> str:
+        """Verificación mock para cartpole"""
+        return """int verify_domain_physics(CartPoleState* state) {
+    // Ángulo del palo en rango [-pi, pi]
+    if (fabsf(state->pole_angle) > 3.14159f) return 0;
+
+    // Posición del carro dentro de límites
+    if (fabsf(state->cart_position) > 2.4f) return 0;
+
+    // Velocidades razonables
+    if (fabsf(state->cart_velocity) > 10.0f) return 0;
+    if (fabsf(state->pole_velocity) > 10.0f) return 0;
+
+    return 1;
+}"""
+
+    def _mock_arm_verify(self) -> str:
+        """Verificación mock para brazo robótico"""
+        return """int verify_domain_physics(RoboticArm2DState* state) {
+    // Ángulos en rango válido
+    if (state->joint1_angle < -3.14159f || state->joint1_angle > 3.14159f) return 0;
+    if (state->joint2_angle < -3.14159f || state->joint2_angle > 3.14159f) return 0;
+
+    // Velocidades articulares razonables
+    if (fabsf(state->joint1_velocity) > 5.0f) return 0;
+    if (fabsf(state->joint2_velocity) > 5.0f) return 0;
+
+    // Posición del end-effector dentro de límites
+    if (state->end_effector_x < -2.0f || state->end_effector_x > 2.0f) return 0;
+    if (state->end_effector_y < -2.0f || state->end_effector_y > 2.0f) return 0;
+
+    return 1;
+}"""
+
+    def _mock_warehouse_verify(self) -> str:
+        """Verificación mock para warehouse robot"""
+        return """int verify_domain_physics(WarehouseRobotState* state) {
+    // Posición dentro del almacén
+    if (state->x < 0.0f || state->x > 10.0f) return 0;
+    if (state->y < 0.0f || state->y > 10.0f) return 0;
+
+    // Orientación en rango válido
+    if (fabsf(state->theta) > 3.14159f) return 0;
+
+    // Velocidades razonables
+    if (fabsf(state->v_linear) > 5.0f) return 0;
+    if (fabsf(state->v_angular) > 3.14159f) return 0;
+
+    // Distancia a obstáculos debe ser positiva
+    if (state->obstacle_front < 0.0f) return 0;
+    if (state->obstacle_left < 0.0f) return 0;
+    if (state->obstacle_right < 0.0f) return 0;
+
+    return 1;
+}"""
+
+    def _mock_generic_verify(self, domain: DomainSpec) -> str:
+        """Verificación genérica"""
+        return f"""int verify_domain_physics({domain.state_struct_name}* state) {{
+    // Verificación genérica: solo chequear que el estado no es NaN
+    // TODO: Implementar verificación específica para {domain.name}
+    return 1;
 }}"""
 
 

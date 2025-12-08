@@ -113,6 +113,12 @@ static inline float clamp(float value, float min_val, float max_val) {{
 {reward_function}
 
 // ============================================================
+// FUNCIÓN DE VERIFICACIÓN SEMÁNTICA (GENERADA POR LLM)
+// ============================================================
+
+{verify_function}
+
+// ============================================================
 // API PÚBLICA
 // ============================================================
 
@@ -209,6 +215,14 @@ void get_observations(UniversalEnvs* envs) {{
 
 {observation_code}
     }}
+}}
+
+/**
+ * Verifica si un estado es semánticamente válido
+ */
+int verify_state({state_struct_name}* state) {{
+    if (!state) return 0;
+    return verify_domain_physics(state);
 }}
 
 // Acceso a buffers (para ctypes)
@@ -346,7 +360,8 @@ class UniversalCompiler:
         self,
         domain: DomainSpec,
         physics_code: str,
-        reward_code: str
+        reward_code: str,
+        verify_code: str = ""
     ) -> str:
         """
         Genera el código C completo para un dominio.
@@ -355,6 +370,7 @@ class UniversalCompiler:
             domain: Especificación del dominio
             physics_code: Función physics_step generada
             reward_code: Función calculate_reward generada
+            verify_code: Función verify_domain_physics (verificación semántica)
 
         Returns:
             Código C completo listo para compilar
@@ -377,6 +393,13 @@ class UniversalCompiler:
         state_init = self._generate_state_init(domain)
         reset_code = self._generate_reset_code(domain)
 
+        # Si no se proporciona verify_code, usar stub genérico
+        if not verify_code:
+            verify_code = f"""int verify_domain_physics({domain.state_struct_name}* state) {{
+    // Verificación genérica: aceptar siempre
+    return 1;
+}}"""
+
         # Llenar template
         code = UNIVERSAL_C_TEMPLATE.format(
             domain_name=domain.name,
@@ -394,6 +417,7 @@ class UniversalCompiler:
             reset_code=reset_code,
             physics_function=physics_code,
             reward_function=reward_code,
+            verify_function=verify_code,
             obs_size=domain.obs_size,
             action_size=domain.action_size,
             observation_code=observation_code,
@@ -407,6 +431,7 @@ class UniversalCompiler:
         domain: DomainSpec,
         physics_code: str,
         reward_code: str,
+        verify_code: str = "",
         output_name: Optional[str] = None
     ) -> CompileOutput:
         """
@@ -416,13 +441,14 @@ class UniversalCompiler:
             domain: Especificación del dominio
             physics_code: Función physics_step
             reward_code: Función calculate_reward
+            verify_code: Función verify_domain_physics (verificación semántica)
             output_name: Nombre del archivo de salida (sin extensión)
 
         Returns:
             CompileOutput con resultado de la compilación
         """
         # Generar código
-        c_code = self.generate_c_code(domain, physics_code, reward_code)
+        c_code = self.generate_c_code(domain, physics_code, reward_code, verify_code)
 
         # Nombre del archivo
         if output_name is None:
