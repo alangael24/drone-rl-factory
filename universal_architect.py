@@ -11,7 +11,8 @@ este arquitecto puede:
 import os
 import re
 import json
-from typing import Optional, Tuple, Dict, Any
+import numpy as np
+from typing import Optional, Tuple, Dict, Any, List
 from dataclasses import dataclass
 
 # Intentar importar API de Gemini
@@ -172,25 +173,77 @@ REQUISITOS:
 Responde SOLO con el código C de la función, sin explicaciones ni markdown.
 """
 
-REFLECTION_PROMPT = """Eres un experto analizando resultados de entrenamiento de RL.
+REFLECTION_PROMPT = """Eres un experto en diseño de funciones de recompensa para RL (basado en el paper Eureka).
 
-CÓDIGO ANTERIOR:
+=== ANÁLISIS DE ENTRENAMIENTO ===
+
+CÓDIGO DE RECOMPENSA ANTERIOR:
 ```c
 {previous_code}
 ```
 
-MÉTRICAS DE ENTRENAMIENTO:
-{metrics}
+MÉTRICAS NUMÉRICAS:
+- Score Total: {score}/100
+- Recompensa Media: {mean_reward:.2f}
+- Desviación Estándar: {std_dev:.2f} ({std_interpretation})
+- Longitud Episodio: {avg_episode_len:.0f} pasos (máx: {max_episode_len})
+- Ganancia de Aprendizaje: {learning_gain:.1f}%
 
-DIAGNÓSTICO:
-{diagnosis}
+=== DIAGNÓSTICO SEMÁNTICO (EUREKA STRATEGY) ===
 
-Basándote en este análisis, genera una versión MEJORADA de la función de recompensa.
+PATRÓN DE FALLO DETECTADO:
+{failure_pattern}
 
-Cambios específicos a realizar:
+ANÁLISIS DE COMPONENTES DE RECOMPENSA:
+{component_analysis}
+
+=== TU MISIÓN ===
+
+Analiza los componentes de la recompensa anterior y responde estas preguntas:
+1. ¿Qué término está DOMINANDO demasiado? (Haciendo que el agente ignore el resto)
+2. ¿Qué término es IRRELEVANTE? (El agente lo ignora porque es muy pequeño)
+3. ¿Los términos están BALANCEADOS en escala?
+
+Luego ESCRIBE UNA NUEVA FUNCIÓN que:
 {specific_changes}
 
-Responde SOLO con el nuevo código C, sin explicaciones.
+REGLAS:
+- Mantén recompensas en rango [-10, +10]
+- Usa expf() para gradientes suaves en lugar de lineales
+- Balancea las escalas de los términos
+
+Responde SOLO con el código C de la función calculate_reward.
+"""
+
+# Prompt para Crossover genético (paper R*)
+CROSSOVER_PROMPT = """Eres un experto en diseño de funciones de recompensa para RL.
+
+Tu tarea es COMBINAR las mejores características de DOS funciones de recompensa existentes.
+
+=== CANDIDATO A (Score: {score_a}/100) ===
+```c
+{code_a}
+```
+FORTALEZAS: {strengths_a}
+
+=== CANDIDATO B (Score: {score_b}/100) ===
+```c
+{code_b}
+```
+FORTALEZAS: {strengths_b}
+
+=== TU MISIÓN ===
+
+Genera una NUEVA función de recompensa que combine:
+- La lógica de {best_trait_a} del Candidato A
+- La lógica de {best_trait_b} del Candidato B
+
+Asegúrate de:
+1. Mantener los términos que funcionaron bien
+2. Eliminar términos redundantes o conflictivos
+3. Balancear las escalas
+
+Responde SOLO con el código C de la función calculate_reward.
 """
 
 
@@ -544,7 +597,7 @@ class UniversalArchitect:
         diagnosis: str
     ) -> GeneratedCode:
         """
-        Evoluciona una función de recompensa basándose en métricas.
+        Evoluciona una función de recompensa basándose en métricas (Eureka Strategy).
 
         Args:
             domain: Especificación del dominio
@@ -557,15 +610,35 @@ class UniversalArchitect:
         """
         if self.use_mock:
             # En modo mock, retornar el mismo código
-            return GeneratedCode("", previous_code, True)
+            return GeneratedCode("", previous_code, "", True)
+
+        # Extraer métricas detalladas
+        mean_reward = metrics.get("mean_reward", 0)
+        rewards = metrics.get("rewards", [])
+        std_dev = float(np.std(rewards)) if rewards else 0
+        avg_episode_len = metrics.get("mean_episode_length", 0)
+        learning_gain = metrics.get("learning_gain", 0) * 100
+
+        # Detectar patrón de fallo
+        failure_pattern = self._detect_failure_pattern(metrics)
+
+        # Analizar componentes de recompensa del código anterior
+        component_analysis = self._analyze_reward_components(previous_code)
 
         # Generar cambios específicos basados en métricas
         specific_changes = self._generate_specific_changes(metrics)
 
         prompt = UNIVERSAL_SYSTEM_PROMPT + "\n\n" + REFLECTION_PROMPT.format(
             previous_code=previous_code,
-            metrics=json.dumps(metrics, indent=2),
-            diagnosis=diagnosis,
+            score=metrics.get("score", 0),
+            mean_reward=mean_reward,
+            std_dev=std_dev,
+            std_interpretation="ALTA - aprendizaje inestable" if std_dev > 2.0 else "OK",
+            avg_episode_len=avg_episode_len,
+            max_episode_len=500,  # Típico para CartPole
+            learning_gain=learning_gain,
+            failure_pattern=failure_pattern,
+            component_analysis=component_analysis,
             specific_changes=specific_changes,
         )
 
@@ -584,6 +657,168 @@ class UniversalArchitect:
             error_message=error,
             raw_response=response,
         )
+
+    def crossover_rewards(
+        self,
+        domain: DomainSpec,
+        candidate_a: Dict[str, Any],
+        candidate_b: Dict[str, Any]
+    ) -> GeneratedCode:
+        """
+        Combina dos funciones de recompensa mediante crossover genético (paper R*).
+
+        Args:
+            domain: Especificación del dominio
+            candidate_a: Dict con 'code', 'score', 'strengths'
+            candidate_b: Dict con 'code', 'score', 'strengths'
+
+        Returns:
+            GeneratedCode con la función combinada
+        """
+        if self.use_mock:
+            # En mock, retornar el mejor
+            if candidate_a.get("score", 0) >= candidate_b.get("score", 0):
+                return GeneratedCode("", candidate_a["code"], "", True)
+            return GeneratedCode("", candidate_b["code"], "", True)
+
+        # Identificar fortalezas de cada candidato
+        strengths_a = candidate_a.get("strengths", "estabilidad")
+        strengths_b = candidate_b.get("strengths", "velocidad de convergencia")
+
+        prompt = UNIVERSAL_SYSTEM_PROMPT + "\n\n" + CROSSOVER_PROMPT.format(
+            score_a=candidate_a.get("score", 0),
+            code_a=candidate_a["code"],
+            strengths_a=strengths_a,
+            score_b=candidate_b.get("score", 0),
+            code_b=candidate_b["code"],
+            strengths_b=strengths_b,
+            best_trait_a=strengths_a.split(",")[0] if "," in strengths_a else strengths_a,
+            best_trait_b=strengths_b.split(",")[0] if "," in strengths_b else strengths_b,
+        )
+
+        response = self._call_llm(prompt)
+        if not response:
+            return GeneratedCode("", "", "", False, "No hubo respuesta del LLM")
+
+        code = self._extract_c_code(response)
+        valid, error = self._validate_reward_code(code, domain)
+
+        return GeneratedCode(
+            physics_code="",
+            reward_code=code if valid else candidate_a["code"],
+            verify_code="",
+            success=valid,
+            error_message=error,
+            raw_response=response,
+        )
+
+    def _detect_failure_pattern(self, metrics: Dict[str, Any]) -> str:
+        """Detecta el patrón de fallo basándose en las métricas (Eureka Reflection)."""
+        patterns = []
+
+        mean_reward = metrics.get("mean_reward", 0)
+        rewards = metrics.get("rewards", [])
+        episode_length = metrics.get("mean_episode_length", 0)
+        learning_gain = metrics.get("learning_gain", 0)
+
+        # Patrón 1: Agente muere muy rápido
+        if episode_length < 30:
+            patterns.append(
+                "MUERTE RÁPIDA: El agente termina los episodios en ~{:.0f} pasos. "
+                "La penalización por fallo es demasiado alta o la recompensa por "
+                "supervivencia es insuficiente.".format(episode_length)
+            )
+
+        # Patrón 2: Recompensa negativa constante
+        if mean_reward < -3:
+            patterns.append(
+                "RECOMPENSA NEGATIVA: Media de {:.2f}. Las penalizaciones dominan. "
+                "El agente está siendo castigado más de lo que es recompensado.".format(mean_reward)
+            )
+
+        # Patrón 3: Sin aprendizaje (stagnation)
+        if rewards and len(rewards) > 10:
+            first_half = np.mean(rewards[:len(rewards)//2])
+            second_half = np.mean(rewards[len(rewards)//2:])
+            if abs(second_half - first_half) < 0.5:
+                patterns.append(
+                    "ESTANCAMIENTO: La recompensa no mejora (primera mitad: {:.2f}, "
+                    "segunda mitad: {:.2f}). El gradiente de recompensa es muy plano "
+                    "o hay un óptimo local.".format(first_half, second_half)
+                )
+
+        # Patrón 4: Alta varianza
+        if rewards:
+            std = np.std(rewards)
+            if std > 3:
+                patterns.append(
+                    "INESTABILIDAD: Alta varianza ({:.2f}). La función de recompensa "
+                    "tiene discontinuidades o rangos muy amplios.".format(std)
+                )
+
+        # Patrón 5: Aprendizaje negativo
+        if learning_gain < -0.1:
+            patterns.append(
+                "DESAPRENDIZAJE: El agente empeoró ({:.1f}%). Posible reward hacking "
+                "o incentivos contradictorios.".format(learning_gain * 100)
+            )
+
+        if not patterns:
+            patterns.append(
+                "SIN PATRÓN CRÍTICO: El entrenamiento progresa normalmente pero "
+                "puede optimizarse para mayor velocidad de convergencia."
+            )
+
+        return "\n".join(f"- {p}" for p in patterns)
+
+    def _analyze_reward_components(self, reward_code: str) -> str:
+        """Analiza los componentes de la función de recompensa."""
+        analysis = []
+
+        # Buscar términos comunes
+        if "fabsf" in reward_code:
+            count = reward_code.count("fabsf")
+            analysis.append(f"- Usa {count} términos de valor absoluto (penalizaciones simétricas)")
+
+        if "expf" in reward_code or "exp(" in reward_code:
+            analysis.append("- Usa exponenciales (gradientes suaves) ✓")
+        else:
+            analysis.append("- NO usa exponenciales (gradientes pueden ser bruscos)")
+
+        if "sqrtf" in reward_code:
+            analysis.append("- Usa raíz cuadrada (distancias euclidianas)")
+
+        # Buscar multiplicadores
+        import re
+        multipliers = re.findall(r'(\d+\.?\d*f?\s*\*)', reward_code)
+        if multipliers:
+            values = [float(m.replace('f', '').replace('*', '').strip()) for m in multipliers]
+            max_mult = max(values) if values else 0
+            min_mult = min(values) if values else 0
+            if max_mult > 0 and min_mult > 0:
+                ratio = max_mult / min_mult
+                if ratio > 10:
+                    analysis.append(f"- ⚠️ DESBALANCE: Ratio de pesos {ratio:.0f}x (max={max_mult}, min={min_mult})")
+                else:
+                    analysis.append(f"- Pesos balanceados (ratio {ratio:.1f}x)")
+
+        # Buscar bonus/penalizaciones
+        if "if " in reward_code:
+            conditions = reward_code.count("if ")
+            analysis.append(f"- {conditions} condiciones if (posibles discontinuidades)")
+
+        if "+=" in reward_code:
+            additions = reward_code.count("+=")
+            analysis.append(f"- {additions} términos aditivos")
+
+        if "-=" in reward_code:
+            subtractions = reward_code.count("-=")
+            analysis.append(f"- {subtractions} penalizaciones")
+
+        if not analysis:
+            analysis.append("- No se pudieron extraer componentes específicos")
+
+        return "\n".join(analysis)
 
     def _generate_specific_changes(self, metrics: Dict[str, Any]) -> str:
         """Genera lista de cambios específicos basados en métricas"""

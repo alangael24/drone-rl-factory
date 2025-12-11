@@ -498,37 +498,138 @@ class UniversalJudge:
 
 def generate_semantic_reflection(judgment: JudgmentResult) -> str:
     """
-    Genera reflexión semántica para el LLM basada en el juicio.
+    Genera reflexión semántica para el LLM basada en el juicio (Eureka Strategy).
 
     Esta es la pieza clave que conecta el juez con el arquitecto
-    para el bucle evolutivo.
+    para el bucle evolutivo. Proporciona el "POR QUÉ" falló el agente.
     """
     reflection_parts = []
 
     # Encabezado
-    reflection_parts.append(f"## Diagnóstico de Entrenamiento")
+    reflection_parts.append(f"## Diagnóstico de Entrenamiento (Eureka Reflection)")
     reflection_parts.append(f"Calidad: {judgment.quality.value.upper()}")
     reflection_parts.append(f"Score: {judgment.score:.1f}/100")
     reflection_parts.append("")
 
-    # Métricas
-    reflection_parts.append("### Métricas Clave:")
-    reflection_parts.append(f"- Ganancia de aprendizaje: {judgment.learning_gain*100:.1f}%")
-    reflection_parts.append(f"- Velocidad de aprendizaje: {judgment.learning_speed*100:.1f}%")
-    reflection_parts.append(f"- Estabilidad: {judgment.stability*100:.1f}%")
-    reflection_parts.append(f"- Monotonicidad: {judgment.monotonicity*100:.1f}%")
-    reflection_parts.append(f"- Rendimiento final: {judgment.final_performance*100:.1f}%")
+    # Métricas con interpretación
+    reflection_parts.append("### Métricas Clave con Interpretación:")
+
+    # Ganancia de aprendizaje
+    gain_pct = judgment.learning_gain * 100
+    if gain_pct > 50:
+        gain_interpretation = "(EXCELENTE: el agente mejoró significativamente)"
+    elif gain_pct > 20:
+        gain_interpretation = "(BUENO: hay progreso)"
+    elif gain_pct > 0:
+        gain_interpretation = "(BAJO: mejora mínima, gradiente de recompensa muy plano)"
+    elif gain_pct > -10:
+        gain_interpretation = "(ESTANCADO: sin mejora, posible óptimo local)"
+    else:
+        gain_interpretation = "(REGRESIÓN: el agente empeoró, posible reward hacking)"
+    reflection_parts.append(f"- Ganancia de aprendizaje: {gain_pct:.1f}% {gain_interpretation}")
+
+    # Estabilidad
+    stability_pct = judgment.stability * 100
+    if stability_pct > 70:
+        stab_interpretation = "(ESTABLE: varianza baja)"
+    elif stability_pct > 40:
+        stab_interpretation = "(MODERADA: algo de ruido)"
+    else:
+        stab_interpretation = "(INESTABLE: alta varianza, reducir rangos de recompensa)"
+    reflection_parts.append(f"- Estabilidad: {stability_pct:.1f}% {stab_interpretation}")
+
+    # Velocidad
+    speed_pct = judgment.learning_speed * 100
+    if speed_pct > 60:
+        speed_interpretation = "(RÁPIDO: convergencia temprana)"
+    elif speed_pct > 30:
+        speed_interpretation = "(NORMAL: progreso gradual)"
+    else:
+        speed_interpretation = "(LENTO: considerar aumentar gradiente de recompensa)"
+    reflection_parts.append(f"- Velocidad de aprendizaje: {speed_pct:.1f}% {speed_interpretation}")
+
+    # Monotonicidad
+    mono_pct = judgment.monotonicity * 100
+    if mono_pct > 70:
+        mono_interpretation = "(CONSISTENTE: mejora sostenida)"
+    elif mono_pct > 50:
+        mono_interpretation = "(VARIABLE: algunas caídas)"
+    else:
+        mono_interpretation = "(ERRÁTICO: muchas oscilaciones, posible señal de recompensa ruidosa)"
+    reflection_parts.append(f"- Monotonicidad: {mono_pct:.1f}% {mono_interpretation}")
+
+    # Rendimiento final
+    final_pct = judgment.final_performance * 100
+    if final_pct > 70:
+        final_interpretation = "(ALTO: buen desempeño final)"
+    elif final_pct > 40:
+        final_interpretation = "(MEDIO: desempeño aceptable)"
+    else:
+        final_interpretation = "(BAJO: no alcanza objetivos)"
+    reflection_parts.append(f"- Rendimiento final: {final_pct:.1f}% {final_interpretation}")
     reflection_parts.append("")
+
+    # Análisis de raw_metrics si están disponibles
+    raw = judgment.raw_metrics
+    if raw:
+        reflection_parts.append("### Análisis de Episodios:")
+        if "mean_reward" in raw:
+            mean_r = raw["mean_reward"]
+            if mean_r < -5:
+                reflection_parts.append(f"- Recompensa media: {mean_r:.2f} (MUY NEGATIVA - las penalizaciones dominan)")
+            elif mean_r < 0:
+                reflection_parts.append(f"- Recompensa media: {mean_r:.2f} (Negativa - más penalizaciones que recompensas)")
+            elif mean_r < 5:
+                reflection_parts.append(f"- Recompensa media: {mean_r:.2f} (Moderada)")
+            else:
+                reflection_parts.append(f"- Recompensa media: {mean_r:.2f} (Buena)")
+
+        if "mean_episode_length" in raw:
+            ep_len = raw["mean_episode_length"]
+            if ep_len < 20:
+                reflection_parts.append(f"- Longitud episodio: {ep_len:.0f} pasos (MUERTE RÁPIDA - priorizar supervivencia)")
+            elif ep_len < 100:
+                reflection_parts.append(f"- Longitud episodio: {ep_len:.0f} pasos (Corto - el agente falla pronto)")
+            elif ep_len > 400:
+                reflection_parts.append(f"- Longitud episodio: {ep_len:.0f} pasos (Largo - posible que no completa objetivo)")
+            else:
+                reflection_parts.append(f"- Longitud episodio: {ep_len:.0f} pasos (Normal)")
+
+        # Análisis de curva de recompensas
+        rewards = raw.get("rewards", [])
+        if rewards and len(rewards) > 10:
+            first_quarter = np.mean(rewards[:len(rewards)//4])
+            last_quarter = np.mean(rewards[-len(rewards)//4:])
+            if abs(last_quarter - first_quarter) < 1.0:
+                reflection_parts.append(f"- PATRÓN: ESTANCAMIENTO detectado (inicio: {first_quarter:.2f}, fin: {last_quarter:.2f})")
+            elif last_quarter < first_quarter:
+                reflection_parts.append(f"- PATRÓN: REGRESIÓN detectada (el agente empeoró)")
+            else:
+                reflection_parts.append(f"- PATRÓN: PROGRESO normal (inicio: {first_quarter:.2f}, fin: {last_quarter:.2f})")
+        reflection_parts.append("")
 
     # Diagnóstico
     reflection_parts.append("### Diagnóstico:")
     reflection_parts.append(judgment.diagnosis)
     reflection_parts.append("")
 
-    # Recomendaciones (lo más importante para el LLM)
+    # Recomendaciones específicas (lo más importante para el LLM)
     reflection_parts.append("### Cambios Requeridos en la Función de Recompensa:")
     for i, rec in enumerate(judgment.recommendations, 1):
         reflection_parts.append(f"{i}. {rec}")
+
+    # Añadir guía específica basada en el patrón detectado
+    reflection_parts.append("")
+    reflection_parts.append("### Guía de Acción:")
+    if judgment.learning_gain < 0.1:
+        reflection_parts.append("- PRIORIDAD: Aumentar el gradiente de recompensa por cercanía al objetivo")
+        reflection_parts.append("- Usar expf(-distance) en lugar de -distance para señal más clara")
+    if judgment.stability < 0.4:
+        reflection_parts.append("- PRIORIDAD: Reducir el rango de las penalizaciones")
+        reflection_parts.append("- Clipear la recompensa final a [-5, 5]")
+    if raw.get("mean_episode_length", 100) < 30:
+        reflection_parts.append("- PRIORIDAD: Añadir bonus de supervivencia (+0.1 por paso)")
+        reflection_parts.append("- Reducir penalizaciones de terminación")
 
     return "\n".join(reflection_parts)
 

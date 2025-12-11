@@ -377,11 +377,12 @@ class UniversalEvolution:
         verbose: bool = True
     ) -> List[EvolutionCandidate]:
         """
-        Crea la siguiente generación mediante selección y mutación.
+        Crea la siguiente generación mediante selección, crossover y mutación.
 
-        Estrategia:
+        Estrategia (Paper R* + Eureka):
         - Mantener el mejor (elitismo)
-        - Mutar los demás basándose en el mejor
+        - Crossover entre los 2 mejores (si hay suficientes candidatos buenos)
+        - Mutar los demás basándose en el mejor con reflexión semántica
         """
         next_population = []
 
@@ -398,16 +399,81 @@ class UniversalEvolution:
         next_population.append(elite)
         self.all_candidates.append(elite)
 
-        # Generar mutaciones del mejor
-        for i in range(self.population_size - 1):
-            # Generar reflexión semántica
+        # Detectar fortalezas de cada candidato para crossover
+        def get_strengths(candidate: EvolutionCandidate) -> str:
+            if not candidate.judgment:
+                return "desconocidas"
+            strengths = []
+            if candidate.judgment.stability > 0.6:
+                strengths.append("estabilidad")
+            if candidate.judgment.learning_speed > 0.5:
+                strengths.append("velocidad de convergencia")
+            if candidate.judgment.monotonicity > 0.6:
+                strengths.append("aprendizaje monotónico")
+            if candidate.judgment.final_performance > 0.5:
+                strengths.append("rendimiento final")
+            return ", ".join(strengths) if strengths else "supervivencia básica"
+
+        # Crossover: combinar los 2 mejores (si hay al menos 2 candidatos con score > 20)
+        good_candidates = [c for c in evaluated if c.score > 20]
+
+        if len(good_candidates) >= 2 and self.population_size > 2:
+            if verbose:
+                print(f"  Crossover entre candidatos con scores {good_candidates[0].score:.1f} y {good_candidates[1].score:.1f}")
+
+            parent_a = good_candidates[0]
+            parent_b = good_candidates[1]
+
+            # Preparar datos para crossover
+            candidate_a = {
+                "code": parent_a.reward_code,
+                "score": parent_a.score,
+                "strengths": get_strengths(parent_a),
+            }
+            candidate_b = {
+                "code": parent_b.reward_code,
+                "score": parent_b.score,
+                "strengths": get_strengths(parent_b),
+            }
+
+            # Realizar crossover
+            crossover_result = self.architect.crossover_rewards(
+                self.domain, candidate_a, candidate_b
+            )
+
+            crossover_child = EvolutionCandidate(
+                generation=self.current_generation + 1,
+                candidate_id=len(self.all_candidates),
+                physics_code=physics_code,
+                reward_code=crossover_result.reward_code if crossover_result.success else best.reward_code,
+                parent_id=best.candidate_id,
+                mutations=[f"crossover({parent_a.candidate_id}, {parent_b.candidate_id})"],
+            )
+            next_population.append(crossover_child)
+            self.all_candidates.append(crossover_child)
+            crossover_slots = 1
+        else:
+            crossover_slots = 0
+
+        # Generar mutaciones del mejor con reflexión semántica (Eureka Strategy)
+        mutations_needed = self.population_size - 1 - crossover_slots
+
+        for i in range(mutations_needed):
+            # Generar reflexión semántica mejorada
             reflection = generate_semantic_reflection(best.judgment)
+
+            # Preparar métricas extendidas para evolución
+            extended_metrics = best.judgment.raw_metrics.copy() if best.judgment else {}
+            if best.judgment:
+                extended_metrics["score"] = best.score
+                extended_metrics["learning_gain"] = best.judgment.learning_gain
+                extended_metrics["stability"] = best.judgment.stability
 
             # Evolucionar recompensa
             evolved = self.architect.evolve_reward(
                 self.domain,
                 best.reward_code,
-                best.judgment.raw_metrics,
+                extended_metrics,
                 reflection
             )
 
