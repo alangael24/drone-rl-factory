@@ -145,6 +145,42 @@ REGLAS:
 Responde SOLO con el código C.
 """
 
+REWARD_GENERATION_PROMPT = """Genera una función de recompensa en C para entrenar un agente RL.
+
+DOMINIO: {domain_name}
+DESCRIPCIÓN: {domain_description}
+INSTRUCCIÓN ORIGINAL: {instruction}
+
+ESTADO (struct {state_struct}):
+{state_fields}
+
+HINTS DE RECOMPENSA:
+{reward_hints}
+
+CONSTANTES DISPONIBLES:
+{constants}
+
+Genera la función:
+```c
+float calculate_reward({state_struct}* state) {{
+    // Tu código aquí
+}}
+```
+
+REGLAS:
+1. La recompensa debe guiar al agente hacia el objetivo
+2. Incluye términos para:
+   - Progreso hacia la meta (distancia)
+   - Penalización por estados indeseados
+   - Bonus por completar la tarea
+   - Shaping para facilitar el aprendizaje
+3. Normaliza los términos para que estén en rangos similares
+4. Solo usa funciones de math.h (sqrtf, fabsf, expf, fminf, fmaxf)
+5. NO uses printf ni funciones de sistema
+
+Responde SOLO con el código C de la función.
+"""
+
 PHYSICS_CRITIQUE_PROMPT = """Eres un físico experto evaluando una simulación.
 
 SISTEMA: {domain_name}
@@ -323,7 +359,7 @@ class DomainGenerator:
         for tc in d.get("termination_conditions", []):
             termination_conditions.append(TerminationCondition(
                 name=tc["name"],
-                condition=tc.get("condition", "0"),
+                condition_code=tc.get("condition", "0"),
                 description=tc.get("description", ""),
             ))
 
@@ -370,19 +406,55 @@ class DomainGenerator:
         return response.strip()
 
     def _generate_initial_reward(self, domain: DomainSpec, instruction: str) -> str:
-        """Genera una función de recompensa inicial simple"""
-        # Buscar campos de objetivo
-        has_target = any("target" in f.name.lower() for f in domain.state_fields)
-        has_position = any(f.name in ["x", "y", "z"] for f in domain.state_fields)
+        """Genera una función de recompensa usando el LLM"""
+        if self.use_mock:
+            return self._mock_reward(domain)
 
-        if has_target and has_position:
+        state_fields_str = "\n".join(
+            f"  - {f.name}: {f.description}" for f in domain.state_fields
+        )
+        constants_str = domain.physics_constants.to_c_defines()
+
+        prompt = REWARD_GENERATION_PROMPT.format(
+            domain_name=domain.name,
+            domain_description=domain.description,
+            instruction=instruction,
+            state_struct=domain.state_struct_name,
+            state_fields=state_fields_str,
+            reward_hints=domain.reward_hints,
+            constants=constants_str,
+        )
+
+        response = self._call_llm(prompt)
+        if not response:
+            return self._mock_reward(domain)
+
+        # Extraer código C
+        code_match = re.search(r'```c?\s*(.*?)\s*```', response, re.DOTALL)
+        if code_match:
+            return code_match.group(1).strip()
+
+        return response.strip()
+
+    def _mock_reward(self, domain: DomainSpec) -> str:
+        """Genera recompensa mock cuando no hay LLM"""
+        # Buscar campos de objetivo
+        goal_field = None
+        pos_field = None
+        for f in domain.state_fields:
+            if "goal" in f.name.lower() or "target" in f.name.lower():
+                goal_field = f.name.replace("_x", "").replace("_y", "")
+            if f.name in ["x", "y", "pos_x", "pos_y"]:
+                pos_field = f.name.replace("_x", "").replace("_y", "")
+
+        if goal_field and pos_field:
             return f"""float calculate_reward({domain.state_struct_name}* state) {{
-    float dx = state->target_x - state->x;
-    float dy = state->target_y - state->y;
+    float dx = state->{goal_field}_x - state->{pos_field}_x;
+    float dy = state->{goal_field}_y - state->{pos_field}_y;
     float dist = sqrtf(dx*dx + dy*dy);
 
     float reward = -dist * 0.1f;
-    if (dist < 1.0f) reward += 10.0f;
+    if (dist < 2.0f) reward += 10.0f;
 
     return reward;
 }}"""
