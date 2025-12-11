@@ -667,12 +667,91 @@ Para navegación en warehouse:
     )
 
 
+def create_pallet_jack_domain() -> DomainSpec:
+    """Crea especificación para Electric Pallet Jack en almacén"""
+    return DomainSpec(
+        name="PalletJack",
+        description="Transpaleta eléctrica para mover pallets del punto A al punto B en un almacén.",
+
+        state_fields=[
+            # Posición del pallet jack
+            StateField("x", description="Posición X (metros)", normalize_by=20.0),
+            StateField("y", description="Posición Y (metros)", normalize_by=20.0),
+            StateField("theta", description="Orientación (radianes)", normalize_by=3.14159),
+            # Velocidades
+            StateField("v_linear", description="Velocidad lineal (m/s)", normalize_by=1.5),
+            StateField("v_angular", description="Velocidad angular (rad/s)", normalize_by=1.0),
+            # Punto de destino (B)
+            StateField("target_x", description="Destino X", normalize_by=20.0, default_value=15.0),
+            StateField("target_y", description="Destino Y", normalize_by=20.0, default_value=15.0),
+            # Estado de carga
+            StateField("has_pallet", FieldType.INT, description="1 si lleva pallet, 0 si no", default_value=1.0),
+            # Sensores de obstáculos (estanterías)
+            StateField("obstacle_front", description="Distancia obstáculo frontal", normalize_by=5.0, default_value=5.0),
+            StateField("obstacle_left", description="Distancia obstáculo izq", normalize_by=5.0, default_value=5.0),
+            StateField("obstacle_right", description="Distancia obstáculo der", normalize_by=5.0, default_value=5.0),
+            # Batería
+            StateField("battery", description="Nivel de batería (0-1)", normalize_by=1.0, default_value=1.0),
+        ],
+
+        action_fields=[
+            ActionField("throttle", -1.0, 1.0, "Acelerador: -1=reversa, +1=adelante"),
+            ActionField("steering", -1.0, 1.0, "Dirección: -1=izquierda, +1=derecha"),
+        ],
+
+        physics_constants=PhysicsConstants(
+            dt=0.05,  # 20 Hz
+            gravity=0.0,  # 2D top-down
+            world_bounds=(20.0, 20.0, 0.0),
+            max_episode_steps=500,
+            custom={
+                "MAX_SPEED": 1.5,
+                "MAX_TURN_RATE": 0.8,
+                "ACCELERATION": 0.5,
+                "FRICTION": 0.1,
+                "PALLET_WEIGHT_FACTOR": 0.7,
+            }
+        ),
+
+        termination_conditions=[
+            TerminationCondition("reached_target",
+                "sqrtf((state->x - state->target_x)*(state->x - state->target_x) + (state->y - state->target_y)*(state->y - state->target_y)) < 0.5f",
+                "Destino alcanzado"),
+            TerminationCondition("collision", "state->obstacle_front < 0.2f", "Colisión"),
+            TerminationCondition("timeout", "state->steps >= MAX_EPISODE_STEPS", "Tiempo agotado"),
+            TerminationCondition("out_of_bounds", "state->x < 0 || state->x > WORLD_SIZE_X || state->y < 0 || state->y > WORLD_SIZE_Y", "Fuera de límites"),
+        ],
+
+        physics_description="""
+Electric Pallet Jack (Transpaleta Eléctrica):
+- Vehículo de almacén para transportar pallets
+- Control: throttle (acelerar/frenar) y steering (girar)
+- Modelo Ackermann simplificado para giros
+- Velocidad máxima reducida cuando lleva carga (has_pallet=1)
+- Inercia y fricción realistas
+- Sensores de proximidad para detectar estanterías
+- Batería que se consume con el uso
+""",
+
+        reward_hints="""
+Para navegación de punto A a punto B:
+- Premiar acercarse al destino (target_x, target_y)
+- Penalizar colisiones con estanterías (obstacle_front < 0.3)
+- Premiar velocidad moderada (no demasiado lento)
+- Penalizar giros bruscos (suavidad)
+- Bonus grande al llegar al destino
+- Penalizar consumo excesivo de batería
+"""
+    )
+
+
 # Catálogo de dominios predefinidos
 DOMAIN_CATALOG = {
     "drone": create_drone_domain,
     "cartpole": create_cartpole_domain,
     "robotic_arm": create_robotic_arm_domain,
     "warehouse_robot": create_warehouse_robot_domain,
+    "pallet_jack": create_pallet_jack_domain,
 }
 
 
