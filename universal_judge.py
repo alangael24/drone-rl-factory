@@ -61,6 +61,29 @@ class TrainingMetrics:
     def add_entropy(self, entropy: float):
         self.entropies.append(entropy)
 
+    @property
+    def mean_reward_initial(self) -> float:
+        """Recompensa media de los primeros episodios"""
+        if not self.rewards:
+            return 0.0
+        n = max(1, len(self.rewards) // 10)
+        return float(np.mean(self.rewards[:n]))
+
+    @property
+    def mean_reward_final(self) -> float:
+        """Recompensa media de los últimos episodios"""
+        if not self.rewards:
+            return 0.0
+        n = max(1, len(self.rewards) // 10)
+        return float(np.mean(self.rewards[-n:]))
+
+    @property
+    def reward_std(self) -> float:
+        """Desviación estándar de las recompensas"""
+        if len(self.rewards) < 2:
+            return 0.0
+        return float(np.std(self.rewards))
+
 
 @dataclass
 class JudgmentResult:

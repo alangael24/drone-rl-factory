@@ -171,6 +171,11 @@ class PhysicsVerifier:
             print("  Testing validez semántica...")
         tests.append(self._test_semantic_validity(domain))
 
+        # Test 9: Reality Check (plausibilidad física)
+        if verbose:
+            print("  Testing plausibilidad física...")
+        tests.append(self._test_reality_plausibility(domain))
+
         # Limpiar
         self._cleanup()
 
@@ -577,6 +582,13 @@ class PhysicsVerifier:
                     hints.append("Evitar rand() dentro de physics_step")
                     hints.append("Usar seed fijo si se necesita aleatoriedad")
 
+                elif "Plausibilidad" in test.name:
+                    diagnosis = "La simulación produce comportamiento físicamente implausible."
+                    hints.append("Verificar que las ecuaciones de movimiento son correctas")
+                    hints.append("Añadir clamp() para evitar valores extremos")
+                    hints.append("Verificar signos de aceleraciones y fuerzas")
+                    hints.append("Usar RealityVerifier para calibrar contra datos reales")
+
         return VerificationReport(
             domain=domain.name,
             compilation_success=compiled,
@@ -631,6 +643,83 @@ class PhysicsVerifier:
                 name="Validez Semántica",
                 result=TestResult.FAILED,
                 message=f"Error durante verificación semántica: {str(e)[:100]}",
+                details={"error": str(e)}
+            )
+
+    def _test_reality_plausibility(self, domain: DomainSpec) -> PhysicsTestResult:
+        """
+        Test 9: Verificación de plausibilidad física (Reality Check).
+
+        Ejecuta una trayectoria de prueba y verifica que:
+        1. No hay valores imposibles (NaN, Inf, extremos)
+        2. El comportamiento es físicamente plausible
+        3. No hay cambios instantáneos imposibles
+
+        Este test NO requiere hardware real - solo verifica que
+        la simulación produce comportamiento realista.
+
+        Para calibración Sim-to-Real completa, usar RealityVerifier
+        con datos del robot físico.
+        """
+        try:
+            from reality_verifier import RealityVerifier
+
+            # Crear verificador
+            verifier = RealityVerifier(domain, self._lib, self._envs)
+
+            # Ejecutar trayectoria de prueba (100 pasos, acciones aleatorias)
+            self._reset()
+
+            trajectory = []
+            for _ in range(100):
+                actions = np.random.uniform(-0.5, 0.5, (4, domain.action_size)).astype(np.float32)
+                self._step(actions)
+                trajectory.append(self._obs[0].copy())  # Primer env
+
+            trajectory = np.array(trajectory)
+
+            # Verificar plausibilidad
+            is_plausible, message = verifier.quick_reality_check(trajectory)
+
+            if is_plausible:
+                return PhysicsTestResult(
+                    name="Plausibilidad Física",
+                    result=TestResult.PASSED,
+                    message=message,
+                    details={
+                        "trajectory_length": len(trajectory),
+                        "obs_range": [float(trajectory.min()), float(trajectory.max())],
+                        "note": "Para calibración Sim-to-Real, usa RealityVerifier.run_wiggle_calibration()"
+                    }
+                )
+            else:
+                return PhysicsTestResult(
+                    name="Plausibilidad Física",
+                    result=TestResult.FAILED,
+                    message=message,
+                    details={
+                        "issues": message.split("; "),
+                        "trajectory_stats": {
+                            "min": float(trajectory.min()),
+                            "max": float(trajectory.max()),
+                            "std": float(trajectory.std())
+                        }
+                    }
+                )
+
+        except ImportError:
+            return PhysicsTestResult(
+                name="Plausibilidad Física",
+                result=TestResult.SKIPPED,
+                message="reality_verifier.py no encontrado",
+                details={}
+            )
+
+        except Exception as e:
+            return PhysicsTestResult(
+                name="Plausibilidad Física",
+                result=TestResult.FAILED,
+                message=f"Error: {str(e)[:100]}",
                 details={"error": str(e)}
             )
 

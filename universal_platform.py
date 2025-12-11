@@ -225,7 +225,7 @@ def verified_train(
 
         from preview_physics import preview_physics
         approved, preview_diagnosis = preview_physics(
-            domain, physics_code, reward_code, verify_code,
+            domain, physics_code, reward_code,
             duration_seconds=5.0
         )
 

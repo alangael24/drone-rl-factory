@@ -182,7 +182,16 @@ float calculate_reward(CartPoleState* state) {
 // ============================================================
 
 int verify_domain_physics(CartPoleState* state) {
-    // Verificación genérica: aceptar siempre
+    // Ángulo del palo en rango [-pi, pi]
+    if (fabsf(state->pole_angle) > 3.14159f) return 0;
+
+    // Posición del carro dentro de límites
+    if (fabsf(state->cart_position) > 2.4f) return 0;
+
+    // Velocidades razonables
+    if (fabsf(state->cart_velocity) > 10.0f) return 0;
+    if (fabsf(state->pole_velocity) > 10.0f) return 0;
+
     return 1;
 }
 

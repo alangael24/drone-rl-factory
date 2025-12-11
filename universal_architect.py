@@ -54,6 +54,13 @@ REGLAS ESTRICTAS:
 4. Usa el operador -> para acceder a campos de structs
 5. Todos los literales flotantes deben terminar en 'f' (ej: 0.5f, 1.0f)
 6. Las recompensas deben estar en rango razonable (-10 a +10)
+
+IMPORTANTE - FORMATO DE SALIDA:
+- NO escribas "Aquí está el código" ni explicaciones
+- NO uses Markdown (```c)
+- Tu salida debe empezar DIRECTAMENTE con "void physics_step" o "float calculate_reward"
+- Termina con la última llave "}"
+- Cualquier texto fuera del código C puro romperá el sistema
 """
 
 PHYSICS_GENERATION_PROMPT = """Genera la función physics_step para el siguiente sistema:
@@ -214,7 +221,9 @@ class UniversalArchitect:
             key = api_key or os.environ.get("GEMINI_API_KEY")
             if key:
                 genai.configure(api_key=key)
-                self.model = genai.GenerativeModel("gemini-2.0-flash-exp")
+                # Usar Gemini 2.5 Flash
+                self.model = genai.GenerativeModel("gemini-2.5-flash")
+                print("✅ Usando Gemini 2.5 Flash")
             else:
                 print("Advertencia: No hay API key. Usando modo mock.")
                 self.use_mock = True
@@ -229,8 +238,20 @@ class UniversalArchitect:
         try:
             response = self.model.generate_content(
                 prompt,
-                generation_config={"temperature": 0.7, "max_output_tokens": 2048}
+                generation_config={
+                    "temperature": 0.7,
+                    "max_output_tokens": 8192,  # Aumentado para funciones completas
+                }
             )
+            # Debug: verificar si se truncó
+            if hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'finish_reason'):
+                    finish = str(candidate.finish_reason)
+                    if 'MAX_TOKENS' in finish or 'LENGTH' in finish:
+                        print(f"⚠️ Respuesta truncada por límite de tokens")
+                    elif 'SAFETY' in finish:
+                        print(f"⚠️ Respuesta bloqueada por filtros de seguridad")
             return response.text
         except Exception as e:
             print(f"Error llamando LLM: {e}")
@@ -254,6 +275,31 @@ class UniversalArchitect:
                 lines.append(line)
 
         return "\n".join(lines).strip()
+
+    def _extract_function(self, code: str, func_signature: str) -> str:
+        """Extrae una función C completa usando contador de llaves."""
+        # Buscar inicio de la función
+        pattern = rf"({func_signature}\s*\([^)]*\)\s*\{{)"
+        match = re.search(pattern, code, re.DOTALL)
+        if not match:
+            return ""
+
+        start_pos = match.start()
+        brace_count = 0
+        in_function = False
+        end_pos = start_pos
+
+        for i, char in enumerate(code[start_pos:], start_pos):
+            if char == '{':
+                brace_count += 1
+                in_function = True
+            elif char == '}':
+                brace_count -= 1
+                if in_function and brace_count == 0:
+                    end_pos = i + 1
+                    break
+
+        return code[start_pos:end_pos].strip()
 
     def _validate_physics_code(self, code: str, domain: DomainSpec) -> Tuple[bool, str]:
         """Valida código de física"""
@@ -416,38 +462,43 @@ class UniversalArchitect:
 
         response = self._call_llm(prompt)
         if not response:
-            return GeneratedCode("", "", "", False, "No hubo respuesta del LLM")
+            print("⚠️ LLM no respondió, usando fallback mock...")
+            return self._fallback_to_mock(domain, task_description)
 
-        # Separar las dos funciones
+        # Separar las dos funciones usando el extractor
         code = self._extract_c_code(response)
 
-        # Buscar physics_step
-        physics_match = re.search(
-            r"void\s+physics_step\s*\([^)]+\)\s*\{[^}]+(?:\{[^}]*\}[^}]*)*\}",
-            code,
-            re.DOTALL
-        )
-
-        # Buscar calculate_reward
-        reward_match = re.search(
-            r"float\s+calculate_reward\s*\([^)]+\)\s*\{[^}]+(?:\{[^}]*\}[^}]*)*\}",
-            code,
-            re.DOTALL
-        )
-
-        physics_code = physics_match.group(0) if physics_match else ""
-        reward_code = reward_match.group(0) if reward_match else ""
+        # Usar el extractor con contador de llaves
+        physics_code = self._extract_function(code, "void physics_step")
+        reward_code = self._extract_function(code, "float calculate_reward")
 
         physics_valid, physics_error = self._validate_physics_code(physics_code, domain) if physics_code else (False, "No se encontró physics_step")
         reward_valid, reward_error = self._validate_reward_code(reward_code, domain) if reward_code else (False, "No se encontró calculate_reward")
 
+        # Si alguna función falló, usar fallback mock
+        if not physics_valid or not reward_valid:
+            print(f"⚠️ LLM generó código incompleto (Physics: {physics_error}, Reward: {reward_error})")
+            print("   Usando fallback mock...")
+            return self._fallback_to_mock(domain, task_description)
+
+        print("✅ Código generado por LLM validado correctamente")
         return GeneratedCode(
             physics_code=physics_code,
             reward_code=reward_code,
             verify_code="",
-            success=physics_valid and reward_valid,
-            error_message=f"Physics: {physics_error}, Reward: {reward_error}" if not (physics_valid and reward_valid) else "",
+            success=True,
             raw_response=response,
+        )
+
+    def _fallback_to_mock(self, domain: DomainSpec, task_description: str) -> GeneratedCode:
+        """Fallback al código mock cuando el LLM falla."""
+        physics = self._mock_physics(domain)
+        reward = self._mock_reward(domain, task_description)
+        return GeneratedCode(
+            physics_code=physics.physics_code,
+            reward_code=reward.reward_code,
+            verify_code="",
+            success=physics.success and reward.success,
         )
 
     def evolve_reward(

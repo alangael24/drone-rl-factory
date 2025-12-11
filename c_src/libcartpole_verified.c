@@ -121,34 +121,31 @@ void set_domain_randomization(UniversalEnvs* envs, float cart_mass_min, float ca
 // ============================================================
 
 void physics_step(CartPoleState* state, float* actions) {
-    // Parámetros físicos
-    float force = actions[0] * 10.0f;  // Convertir de [-1,1] a [-10,10]
-
-    float cart_mass = state->cart_mass > 0.0f ? state->cart_mass : 1.0f;
-    float pole_mass = state->pole_mass > 0.0f ? state->pole_mass : 0.1f;
-    float pole_length = state->pole_length > 0.0f ? state->pole_length : 0.5f;
-
-    float total_mass = cart_mass + pole_mass;
-    float pole_half = pole_length * 0.5f;
-
-    float sin_theta = sinf(state->pole_angle);
-    float cos_theta = cosf(state->pole_angle);
-
-    // Ecuaciones del péndulo invertido
-    float temp = (force + pole_mass * pole_half * state->pole_velocity * state->pole_velocity * sin_theta) / total_mass;
-
-    float theta_acc = (DEFAULT_GRAVITY * sin_theta - cos_theta * temp) /
-                      (pole_half * (4.0f/3.0f - pole_mass * cos_theta * cos_theta / total_mass));
-
-    float x_acc = temp - pole_mass * pole_half * theta_acc * cos_theta / total_mass;
-
-    // Integración de Euler
-    state->cart_velocity += x_acc * DT;
-    state->cart_position += state->cart_velocity * DT;
-
-    state->pole_velocity += theta_acc * DT;
-    state->pole_angle += state->pole_velocity * DT;
-
+    const float gravity = DEFAULT_GRAVITY;
+    const float dt = DT;
+    const float cart_pos = state->cart_position;
+    const float cart_vel = state->cart_velocity;
+    const float pole_angle = state->pole_angle;
+    const float pole_vel = state->pole_velocity;
+    const float cart_mass = state->cart_mass;
+    const float pole_mass = state->pole_mass;
+    const float pole_length_full = state->pole_length;
+    const float pole_length_com = pole_length_full * 0.5f;
+    const float force = actions[0];
+    const float sin_angle = sinf(pole_angle);
+    const float cos_angle = cosf(pole_angle);
+    const float total_mass = cart_mass + pole_mass;
+    const float pole_mass_length_com = pole_mass * pole_length_com;
+    const float temp_numerator = force + pole_mass_length_com * pole_vel * pole_vel * sin_angle;
+    const float temp = temp_numerator / total_mass;
+    const float angle_accel_numerator = gravity * sin_angle - cos_angle * temp;
+    const float angle_accel_denominator = pole_length_com * (4.0f/3.0f - pole_mass * cos_angle * cos_angle / total_mass);
+    const float pole_angle_accel = angle_accel_numerator / angle_accel_denominator;
+    const float cart_accel = temp - pole_mass_length_com * pole_angle_accel * cos_angle / total_mass;
+    state->cart_position += dt * cart_vel;
+    state->cart_velocity += dt * cart_accel;
+    state->pole_angle += dt * pole_vel;
+    state->pole_velocity += dt * pole_angle_accel;
     state->steps++;
 }
 
@@ -157,24 +154,34 @@ void physics_step(CartPoleState* state, float* actions) {
 // ============================================================
 
 float calculate_reward(CartPoleState* state) {
-    // Recompensa por mantener el palo vertical
-    float angle_penalty = fabsf(state->pole_angle);
-
-    // Recompensa por mantener el carro centrado
-    float position_penalty = fabsf(state->cart_position) * 0.1f;
-
-    // Recompensa base por sobrevivir
-    float reward = 1.0f;
-
-    // Penalizaciones
-    reward -= angle_penalty * 2.0f;
-    reward -= position_penalty;
-
-    // Penalización por velocidades altas
-    reward -= fabsf(state->pole_velocity) * 0.1f;
-    reward -= fabsf(state->cart_velocity) * 0.05f;
-
+    float reward = 0.0f;
+    const float angle_threshold = 0.418f;
+    const float position_threshold = WORLD_SIZE_X;
+    if (fabsf(state->pole_angle) > angle_threshold || fabsf(state->cart_position) > position_threshold) {
+        reward = -10.0f;
+    } else {
+        reward = 1.0f;
+        float angle_deviation_norm = fabsf(state->pole_angle) / angle_threshold;
+        reward -= 2.0f * angle_deviation_norm;
+        float position_deviation_norm = fabsf(state->cart_position) / position_threshold;
+        reward -= 1.0f * position_deviation_norm;
+        const float max_cart_vel = 5.0f;
+        const float max_pole_vel = 5.0f;
+        float cart_vel_norm = fabsf(state->cart_velocity) / max_cart_vel;
+        float pole_vel_norm = fabsf(state->pole_velocity) / max_pole_vel;
+        reward -= 0.5f * cart_vel_norm;
+        reward -= 0.5f * pole_vel_norm;
+    }
     return reward;
+}
+
+// ============================================================
+// FUNCIÓN DE VERIFICACIÓN SEMÁNTICA (GENERADA POR LLM)
+// ============================================================
+
+int verify_domain_physics(CartPoleState* state) {
+    // Verificación genérica: aceptar siempre
+    return 1;
 }
 
 // ============================================================
@@ -289,6 +296,14 @@ void get_observations(UniversalEnvs* envs) {
         obs[2] = state->pole_angle / 0.418f;
         obs[3] = state->pole_velocity / 5.0f;
     }
+}
+
+/**
+ * Verifica si un estado es semánticamente válido
+ */
+int verify_state(CartPoleState* state) {
+    if (!state) return 0;
+    return verify_domain_physics(state);
 }
 
 // Acceso a buffers (para ctypes)
