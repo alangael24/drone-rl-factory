@@ -80,7 +80,12 @@ Donde 'actions' es un array de {action_size} valores en rango [-1, 1]:
 REQUISITOS:
 1. Implementa las ecuaciones de movimiento del sistema
 2. Actualiza todos los campos de estado relevantes
-3. Usa integración de Euler: nuevo = viejo + derivada * DT
+3. USA INTEGRACIÓN RUNGE-KUTTA 4TO ORDEN (RK4):
+   - k1 = f(y)
+   - k2 = f(y + dt/2 * k1)
+   - k3 = f(y + dt/2 * k2)
+   - k4 = f(y + dt * k3)
+   - y_new = y + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
 4. Aplica límites físicos razonables (clamp)
 5. Incrementa state->steps al final
 
@@ -111,37 +116,29 @@ REQUISITOS:
 Responde SOLO con el código C de la función, sin explicaciones ni markdown.
 """
 
-COMBINED_GENERATION_PROMPT = """Genera TANTO la función de física como la de recompensa para:
+COMBINED_GENERATION_PROMPT = """Genera las funciones physics_step y calculate_reward para CartPole.
 
-{domain_prompt}
+TAREA: {task_description}
 
-TAREA:
-{task_description}
+NO INCLUYAS typedef del estado - ya existe. Solo genera estas DOS funciones:
 
-Necesito DOS funciones:
-
-1. FÍSICA - cómo se mueve el sistema:
-```c
 void physics_step({state_struct}* state, float* actions) {{
-    // Ecuaciones de movimiento
+    // USA RK4: calcular k1,k2,k3,k4 y aplicar formula RK4
+    // Acciones: actions[0] en [-1,1] -> fuerza
+    // Usar constantes: DT, DEFAULT_GRAVITY
+    // Campos del estado: cart_position, cart_velocity, pole_angle, pole_velocity
+    // Campos masa: cart_mass, pole_mass, pole_length
+    state->steps++;
 }}
-```
 
-2. RECOMPENSA - qué queremos que aprenda:
-```c
 float calculate_reward({state_struct}* state) {{
-    // Recompensa para la tarea
+    // Recompensa por mantener el palo vertical y carro centrado
     return reward;
 }}
-```
 
-Acciones disponibles ({action_size} valores en [-1, 1]):
-{action_descriptions}
+Acciones: {action_descriptions}
 
-IMPORTANTE:
-- Responde con AMBAS funciones
-- Sepáralas claramente
-- Sin explicaciones, solo código C
+RESPONDE SOLO CON CÓDIGO C. Empieza directamente con "void physics_step".
 """
 
 VERIFY_GENERATION_PROMPT = """Genera una función de verificación semántica para validar que la física se comporta correctamente.
@@ -278,13 +275,23 @@ class UniversalArchitect:
 
     def _extract_function(self, code: str, func_signature: str) -> str:
         """Extrae una función C completa usando contador de llaves."""
-        # Buscar inicio de la función
-        pattern = rf"({func_signature}\s*\([^)]*\)\s*\{{)"
+        # Buscar inicio de la función con patrón más flexible
+        # Permite cualquier caracter en los parámetros (incluyendo *, &, etc.)
+        pattern = rf"({func_signature}\s*\(.*?\)\s*\{{)"
         match = re.search(pattern, code, re.DOTALL)
         if not match:
-            return ""
+            # Intentar un enfoque más simple: buscar la posición del nombre de función
+            func_pos = code.find(func_signature)
+            if func_pos == -1:
+                return ""
+            # Buscar la primera llave después de la función
+            brace_pos = code.find("{", func_pos)
+            if brace_pos == -1:
+                return ""
+            start_pos = func_pos
+        else:
+            start_pos = match.start()
 
-        start_pos = match.start()
         brace_count = 0
         in_function = False
         end_pos = start_pos
@@ -300,6 +307,29 @@ class UniversalArchitect:
                     break
 
         return code[start_pos:end_pos].strip()
+
+    def _extract_physics_with_helpers(self, code: str) -> str:
+        """
+        Extrae todo el código de física incluyendo typedef, calc_derivs y physics_step.
+        Captura desde el inicio hasta el final de physics_step.
+        """
+        # Primero intentar extraer solo physics_step
+        physics_func = self._extract_function(code, "void physics_step")
+
+        # Encontrar donde empieza calculate_reward para saber dónde cortar
+        reward_pos = code.find("float calculate_reward")
+        if reward_pos == -1:
+            # Si no hay reward, usar solo physics_step si existe
+            return physics_func if physics_func else code.strip()
+
+        # Todo lo que está antes de calculate_reward es código de física
+        physics_section = code[:reward_pos].strip()
+
+        # Verificar que contiene physics_step
+        if "void physics_step" in physics_section:
+            return physics_section
+
+        return physics_func if physics_func else ""
 
     def _validate_physics_code(self, code: str, domain: DomainSpec) -> Tuple[bool, str]:
         """Valida código de física"""
@@ -465,11 +495,16 @@ class UniversalArchitect:
             print("⚠️ LLM no respondió, usando fallback mock...")
             return self._fallback_to_mock(domain, task_description)
 
+        # DEBUG
+        print(f"🔍 Respuesta LLM ({len(response)} chars):")
+        print(response[:800] if len(response) > 800 else response)
+        print("-" * 50)
+
         # Separar las dos funciones usando el extractor
         code = self._extract_c_code(response)
 
-        # Usar el extractor con contador de llaves
-        physics_code = self._extract_function(code, "void physics_step")
+        # Extraer physics_step con todo el código previo (typedef, calc_derivs, etc.)
+        physics_code = self._extract_physics_with_helpers(code)
         reward_code = self._extract_function(code, "float calculate_reward")
 
         physics_valid, physics_error = self._validate_physics_code(physics_code, domain) if physics_code else (False, "No se encontró physics_step")
@@ -700,33 +735,61 @@ class UniversalArchitect:
     def _mock_cartpole_physics(self) -> str:
         return """void physics_step(CartPoleState* state, float* actions) {
     // Parámetros físicos
-    float force = actions[0] * 10.0f;  // Convertir de [-1,1] a [-10,10]
-
+    float force = actions[0] * 10.0f;
     float cart_mass = state->cart_mass > 0.0f ? state->cart_mass : 1.0f;
     float pole_mass = state->pole_mass > 0.0f ? state->pole_mass : 0.1f;
     float pole_length = state->pole_length > 0.0f ? state->pole_length : 0.5f;
-
     float total_mass = cart_mass + pole_mass;
     float pole_half = pole_length * 0.5f;
+    float dt = DT;
+    float g = DEFAULT_GRAVITY;
 
-    float sin_theta = sinf(state->pole_angle);
-    float cos_theta = cosf(state->pole_angle);
+    // Estado actual
+    float x = state->cart_position;
+    float x_dot = state->cart_velocity;
+    float theta = state->pole_angle;
+    float theta_dot = state->pole_velocity;
 
-    // Ecuaciones del péndulo invertido
-    float temp = (force + pole_mass * pole_half * state->pole_velocity * state->pole_velocity * sin_theta) / total_mass;
+    // Función de derivadas del CartPole
+    #define CARTPOLE_DERIVS(th, th_dot, x_d_out, th_d_out) { \\
+        float st = sinf(th); \\
+        float ct = cosf(th); \\
+        float tmp = (force + pole_mass * pole_half * th_dot * th_dot * st) / total_mass; \\
+        th_d_out = (g * st - ct * tmp) / (pole_half * (4.0f/3.0f - pole_mass * ct * ct / total_mass)); \\
+        x_d_out = tmp - pole_mass * pole_half * th_d_out * ct / total_mass; \\
+    }
 
-    float theta_acc = (DEFAULT_GRAVITY * sin_theta - cos_theta * temp) /
-                      (pole_half * (4.0f/3.0f - pole_mass * cos_theta * cos_theta / total_mass));
+    // RK4 - k1
+    float k1_x_dot, k1_theta_dot;
+    CARTPOLE_DERIVS(theta, theta_dot, k1_x_dot, k1_theta_dot);
+    float k1_x = x_dot;
+    float k1_theta = theta_dot;
 
-    float x_acc = temp - pole_mass * pole_half * theta_acc * cos_theta / total_mass;
+    // RK4 - k2
+    float k2_x_dot, k2_theta_dot;
+    CARTPOLE_DERIVS(theta + 0.5f*dt*k1_theta, theta_dot + 0.5f*dt*k1_theta_dot, k2_x_dot, k2_theta_dot);
+    float k2_x = x_dot + 0.5f*dt*k1_x_dot;
+    float k2_theta = theta_dot + 0.5f*dt*k1_theta_dot;
 
-    // Integración de Euler
-    state->cart_velocity += x_acc * DT;
-    state->cart_position += state->cart_velocity * DT;
+    // RK4 - k3
+    float k3_x_dot, k3_theta_dot;
+    CARTPOLE_DERIVS(theta + 0.5f*dt*k2_theta, theta_dot + 0.5f*dt*k2_theta_dot, k3_x_dot, k3_theta_dot);
+    float k3_x = x_dot + 0.5f*dt*k2_x_dot;
+    float k3_theta = theta_dot + 0.5f*dt*k2_theta_dot;
 
-    state->pole_velocity += theta_acc * DT;
-    state->pole_angle += state->pole_velocity * DT;
+    // RK4 - k4
+    float k4_x_dot, k4_theta_dot;
+    CARTPOLE_DERIVS(theta + dt*k3_theta, theta_dot + dt*k3_theta_dot, k4_x_dot, k4_theta_dot);
+    float k4_x = x_dot + dt*k3_x_dot;
+    float k4_theta = theta_dot + dt*k3_theta_dot;
 
+    // Integración RK4
+    state->cart_position = x + (dt/6.0f) * (k1_x + 2.0f*k2_x + 2.0f*k3_x + k4_x);
+    state->cart_velocity = x_dot + (dt/6.0f) * (k1_x_dot + 2.0f*k2_x_dot + 2.0f*k3_x_dot + k4_x_dot);
+    state->pole_angle = theta + (dt/6.0f) * (k1_theta + 2.0f*k2_theta + 2.0f*k3_theta + k4_theta);
+    state->pole_velocity = theta_dot + (dt/6.0f) * (k1_theta_dot + 2.0f*k2_theta_dot + 2.0f*k3_theta_dot + k4_theta_dot);
+
+    #undef CARTPOLE_DERIVS
     state->steps++;
 }"""
 
